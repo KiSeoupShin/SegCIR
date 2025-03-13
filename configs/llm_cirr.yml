@@ -1,0 +1,5 @@
+# config.yml
+
+gpu : 1
+batch_size : 1
+workers : 0

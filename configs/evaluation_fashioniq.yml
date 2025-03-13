@@ -7,7 +7,7 @@ val_data: './cc/dummy_val_data.csv'
 prompts: null
 retrieval_data: null
 demo_out: "demo"
-source_data: toptee     # ['dress', 'shirt', 'toptee']
+source_data: dress     # ['dress', 'shirt', 'toptee']
 target_data: null
 target_pad: false
 query_file: null
@@ -42,7 +42,7 @@ save_frequency: 1
 save_most_recent: false
 zeroshot_frequency: 2
 regression_frequency: 2
-resume: "auto"
+resume: "/home/work/gisub_conference/2024_dna_conference/logs/2025-03-11/epoch_25.pt"
 precision: "amp"   # ["amp", "fp16", "fp32"]
 model: "ViT-L/14"
 # ["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 

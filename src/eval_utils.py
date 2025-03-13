@@ -35,20 +35,49 @@ from utils import is_master
 from transformers import SamModel, SamProcessor, AutoProcessor, AutoModelForZeroShotObjectDetection
 import torchvision
 
+import sys
+sys.path.append("/home/work/gisub_conference/sam2")
+
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+try:
+    from torchvision.transforms import InterpolationMode
+    BICUBIC = InterpolationMode.BICUBIC
+except ImportError:
+    BICUBIC = Image.BICUBIC
+
 class SegmentImage():
     def __init__(self):
         self.device = "cuda:1"
         self.dino_model, self.dino_processor = self.get_dino()
-        self.sam_model, self.sam_processor = self.get_sam()
+        # self.sam_model, self.sam_processor = self.get_sam()
+
+        self.checkpoint = "checkpoints/sam2.1_hiera_large.pt"
+        self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        self.sam_model = build_sam2(self.model_cfg, self.checkpoint)
+        self.sam_model.to(self.device)
+        self.sam_processor = SAM2ImagePredictor(self.sam_model)
 
         self.mask_transform = torchvision.transforms.Compose([
             torchvision.transforms.ToTensor(), 
             torchvision.transforms.Resize((224, 224)),
             torchvision.transforms.Normalize(0.5, 0.26)
         ])
+        self.transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((224, 224), interpolation=BICUBIC),
+            torchvision.transforms.CenterCrop((224, 224)),
+            self._convert_image_to_rgb,
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+
+        self.no_mask = 0
 
     def __len__(self):
         return len(self.captions)
+
+    def _convert_image_to_rgb(self, image):
+        return image.convert("RGB")
 
     def transform(self, image_path, text):
         image = Image.open(image_path)
@@ -56,15 +85,29 @@ class SegmentImage():
         if len(np.array(image).shape) != 3:
             image = image.convert('RGB')
 
-        try:
-            input_boxes = self.dino_process(image, text)
-            image_maskes = self.sam_process(image, input_boxes)
-
-            image_maskes = np.array(image_maskes)
-            binary_maskes = (image_maskes[0, :, :] != 0)
+        input_boxes = self.dino_process(image, text)
+        if input_boxes[0] == []:
+            image_maskes = torch.ones([1] + list(np.array(image).shape[:2]), dtype=torch.uint8)
+            self.no_mask += 1
+        else:
+            if len(input_boxes[0]) != 1:
+                input_boxes = [[input_boxes[0][0]]]
         
-        except:
-            binary_maskes = np.ones(np.array(image).shape[1:], dtype=np.array(image).dtype)
+            image_maskes = self.sam_process(image, input_boxes)
+        image_maskes = self.transforms.transforms[0](image_maskes)
+        image_maskes = self.transforms.transforms[1](image_maskes)
+        image_maskes = np.array(image_maskes)
+
+#            binary_maskes = (image_maskes[0, :, :] != 0)
+#            binary_maskes = (image_maskes[0, :, :] != 0)
+#        
+#        except:
+#            binary_maskes = np.ones(np.array(image).shape[1:], dtype=np.array(image).dtype)
+            
+        binary_maskes = (image_maskes[0, :, :] != 0)
+        
+        #except:
+        #    binary_maskes = np.ones(np.array(image).shape[1:], dtype=np.array(image).dtype)
             
         alphas = self.mask_transform((binary_maskes * 255).astype(np.uint8))
 
@@ -99,24 +142,36 @@ class SegmentImage():
 
         return sam_model, sam_processor
 
-    def sam_process(self, images, input_boxes):
-        inputs = self.sam_processor(images, input_boxes=input_boxes, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.sam_model(**inputs)
+    # def sam_process(self, images, input_boxes):
+    #     inputs = self.sam_processor(images, input_boxes=input_boxes, return_tensors="pt").to(self.device)
+    #     with torch.no_grad():
+    #         outputs = self.sam_model(**inputs)
 
-        masks = self.sam_processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu()
-        )
+    #     masks = self.sam_processor.image_processor.post_process_masks(
+    #         outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu()
+    #     )
 
-        combined_mask = None
-        for mask in masks[0]:
-            new_mask = mask.float()
-            if combined_mask is None:
-                combined_mask = new_mask
-            else:
-                combined_mask = np.maximum(combined_mask, new_mask)
+    #     combined_mask = None
+    #     for mask in masks[0]:
+    #         new_mask = mask.float()
+    #         if combined_mask is None:
+    #             combined_mask = new_mask
+    #         else:
+    #             combined_mask = np.maximum(combined_mask, new_mask)
         
-        return combined_mask
+    #     return combined_mask
+
+    def sam_process(self, image, boxes):
+        with torch.inference_mode():
+            self.sam_processor.set_image(image)
+            masks, scores, _ = self.sam_processor.predict(
+                point_coords=None,
+                point_labels=None,
+                box=boxes,
+                multimask_output=False,
+                )
+        
+        return torch.tensor(masks)
 
 
 def prepare_img(img_file, transform):
@@ -154,10 +209,17 @@ def visualize_results(model, model_clip, img2text, args, prompt, dataloader):
         ## Extract features of target images. 
         with torch.no_grad():
             for batch in tqdm(dataloader):
-                images, filenames = batch
+                target_images, target_token, filenames = batch
                 if args.gpu is not None:
-                    images = images.cuda(args.gpu, non_blocking=True)
-                image_features = m_c.encode_image(images)         
+                    target_images = target_images.cuda(args.gpu, non_blocking=True)
+                mask_img = torch.ones_like(target_images[0, :1, :, :])  # all masking
+                #image_features, _ = m.visual(target_images, mask_img, return_attn=True)
+                #id_split = tokenize(["*"])[0][1]   
+                #target_text_features = m.encode_text(target_token)   
+                #image_tokens = img2text(image_features.unsqueeze(1))  # for QFormer
+                #target_features = m.encode_text_img_retrieval(target_text_features, image_tokens, split_ind=id_split, repeat=False)
+                #target_features = target_features / target_features.norm(dim=-1, keepdim=True)
+                image_features = m_c.encode_image(target_images)         
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True) 
                 all_image_features.append(image_features)
                 for name in filenames:
@@ -390,10 +452,11 @@ def evaluate_coco(model, model_clip, img2text, args, loader):
     return metrics
 
 
-def evaluate_cirr(model, img2text, args, query_loader, target_loader):
+def evaluate_cirr(model, model_clip, img2text, args, query_loader, target_loader):
     if not is_master(args):
         return
     model.eval()
+    model_clip.eval()
     img2text.eval()
 
     all_image_features = []  
@@ -405,7 +468,10 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
     all_target_paths = []
     all_answer_paths = []
     all_raw_captions = []
+    all_pic2word_features = []
+
     m = model.module if args.distributed or args.dp else model
+    m_c = model_clip.module if args.distributed or args.dp else model_clip
     logit_scale = m.logit_scale.exp()
     logit_scale = logit_scale.mean()   
 
@@ -414,16 +480,17 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
             target_images, target_paths = batch
             if args.gpu is not None:
                 target_images = target_images.cuda(args.gpu, non_blocking=True)
-            image_features = m.encode_image(target_images)
+            image_features = m_c.encode_image(target_images)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
             all_image_features.append(image_features)
             for path in target_paths:
                 all_target_paths.append(path)
 
         for batch in tqdm(query_loader):
-            ref_images, text_with_blank, caption_only, ref_paths, answer_paths, raw_captions = batch
+            ref_images, ref_alphas, text_with_blank, caption_only, ref_paths, answer_paths, raw_captions = batch
             if args.gpu is not None:
                 ref_images = ref_images.cuda(args.gpu, non_blocking=True)
+                ref_alphas = ref_alphas.cuda(args.gpu, non_blocking=True)
                 text_with_blank = text_with_blank.cuda(args.gpu, non_blocking=True)
                 caption_only = caption_only.cuda(args.gpu, non_blocking=True)
             id_split = tokenize(["*"])[0][1]                        
@@ -435,21 +502,26 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
                 all_raw_captions.append(cap)
 
             caption_features = m.encode_text(caption_only)
+            image_features = m_c.encode_image(ref_images)
+            image_tokens = img2text(image_features.unsqueeze(1))
+            clip_feature = m.encode_text_img_retrieval(text_with_blank, image_tokens, split_ind=id_split, repeat=False)  
             ## Composed features
-            query_image_features = m.encode_image(ref_images)
-            query_image_tokens = img2text(query_image_features)
+            query_image_features, _ = m.visual(ref_images, ref_alphas, return_attn=True)
+            query_image_tokens = img2text(query_image_features.unsqueeze(1))
             composed_feature = m.encode_text_img_retrieval(text_with_blank, query_image_tokens, split_ind=id_split, repeat=False)                
 
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
             caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)                       
             query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)   
+            clip_feature = clip_feature / clip_feature.norm(dim=-1, keepdim=True)
             composed_feature = composed_feature / composed_feature.norm(dim=-1, keepdim=True)            
             mixture_features = query_image_features + caption_features            
             mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
             all_caption_features.append(caption_features)
             all_query_image_features.append(query_image_features)
             all_composed_features.append(composed_feature)            
-            all_mixture_features.append(mixture_features)                        
+            all_mixture_features.append(mixture_features)   
+            all_pic2word_features.append(clip_feature)                     
 
         all_target_paths = np.array(all_target_paths)
         all_ref_paths = np.array(all_ref_paths)
@@ -464,7 +536,8 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
         feats = {'composed': torch.cat(all_composed_features), 
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
-                 'mixture': torch.cat(all_mixture_features)}
+                 'mixture': torch.cat(all_mixture_features),
+                 'pic2word':torch.cat(all_pic2word_features)}
         
         for key, value in feats.items():
             metrics = metric_func(ref_features=value)
@@ -491,7 +564,7 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
     all_answer_paths = []
     all_ids = []
 
-    m = model.module if args.distributed or args.dp else model   
+    m = model.module if args.distributed or args.dp else model  
     logit_scale = m.logit_scale.exp()
     logit_scale = logit_scale.mean()   
 
@@ -500,7 +573,7 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
             target_images, target_paths = batch
             if args.gpu is not None:
                 target_images = target_images.cuda(args.gpu, non_blocking=True)
-            image_features = m.encode_image(target_images)
+            image_features = m_c.encode_image(target_images)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             all_image_features.append(image_features)
             for path in target_paths:
@@ -527,12 +600,17 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
                 query_image_tokens = img2text(query_image_features)
                 composed_feature = m.encode_text_img_retrieval(text_with_blank, query_image_tokens, split_ind=id_split, repeat=False)
 
+            image_tokens = img2text(image_features.unsqueeze(1))
+            clip_feature = m.encode_text_img_retrieval(target_caption, image_tokens, split_ind=id_split, repeat=False)
+
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
             caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)                       
             query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)   
+            clip_feature = clip_feature / clip_feature.norm(dim=-1, keepdim=True)       
             composed_feature = composed_feature / composed_feature.norm(dim=-1, keepdim=True)            
             mixture_features = query_image_features + caption_features
             mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
+            all_pic2word_features.append(clip_feature)
             all_caption_features.append(caption_features)
             all_query_image_features.append(query_image_features)
             all_composed_features.append(composed_feature)            
@@ -550,7 +628,8 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
         feats = {'composed': torch.cat(all_composed_features), 
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
-                 'mixture': torch.cat(all_mixture_features)}        
+                 'mixture': torch.cat(all_mixture_features),
+                 'pic2word': torch.cat(all_pic2word_features)}        
         for key, value in feats:
             res_all[key] = metrics_func(ref_features=value)
     return res_all
@@ -569,6 +648,8 @@ def evaluate_fashion(model, model_clip, img2text, args, source_loader, target_lo
     all_caption_features = []  
     all_mixture_features = []  
     all_reference_names = []
+    all_pic2word_features = []
+    all_alpha_features = []
     all_captions = []     
     m = model.module if args.distributed or args.dp else model
     m_c = model_clip.module if args.distributed or args.dp else model_clip
@@ -577,9 +658,16 @@ def evaluate_fashion(model, model_clip, img2text, args, source_loader, target_lo
 
     with torch.no_grad():
         for batch in tqdm(target_loader):
-            target_images, target_paths = batch
+            target_images, target_token, target_paths = batch
             if args.gpu is not None:
                 target_images = target_images.cuda(args.gpu, non_blocking=True)
+                target_token = target_token.cuda(args.gpu, non_blocking=True)
+            #mask_img = torch.ones_like(target_images[0, :1, :, :])  # all masking
+            #image_features, _ = m.visual(target_images, mask_img, return_attn=True)
+            #id_split = tokenize(["*"])[0][1]   
+            #image_tokens = img2text(image_features.unsqueeze(1))  # for QFormer
+            #target_features = m.encode_text_img_retrieval(target_token, image_tokens, split_ind=id_split, repeat=False)
+            #target_features = target_features / target_features.norm(dim=-1, keepdim=True)
             image_features = m_c.encode_image(target_images)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             all_image_features.append(image_features)
@@ -588,7 +676,7 @@ def evaluate_fashion(model, model_clip, img2text, args, source_loader, target_lo
 
     with torch.no_grad():
         for batch in tqdm(source_loader):
-            ref_images, ref_alphas, target_images, target_caption, caption_only, answer_paths, ref_names, captions = batch
+            ref_images, ref_alphas, target_images, target_caption, caption_only, answer_paths, ref_names, captions, no_mask = batch
             for path in answer_paths:
                 all_answer_paths.append(path)
             all_reference_names.extend(ref_names)
@@ -599,20 +687,27 @@ def evaluate_fashion(model, model_clip, img2text, args, source_loader, target_lo
                 target_images = target_images.cuda(args.gpu, non_blocking=True)
                 target_caption = target_caption.cuda(args.gpu, non_blocking=True)
                 caption_only = caption_only.cuda(args.gpu, non_blocking=True)
-            # image_features = m.encode_image(target_images)
+            image_features = m_c.encode_image(ref_images)
             query_image_features, _ = m.visual(ref_images, ref_alphas, return_attn=True)
-            id_split = tokenize(["*"])[0][1]            
+            id_split = tokenize(["*"])[0][1]           
             caption_features = m.encode_text(target_caption)                            
-            query_image_tokens = img2text(query_image_features.unsqueeze(1))  # for QFormer          
-            composed_feature = m.encode_text_img_retrieval(target_caption, query_image_tokens, split_ind=id_split, repeat=False)
-            # image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
+            image_tokens = img2text(image_features.unsqueeze(1))  # for QFormer     
+            query_image_tokens = img2text(query_image_features.unsqueeze(1))  # for QFormer 
+            clip_feature = m.encode_text_img_retrieval(target_caption, image_tokens, split_ind=id_split, repeat=False)
+            alpha_feature = m.encode_text_img_retrieval(target_caption, query_image_tokens, split_ind=id_split, repeat=False)
+            composed_feature = (clip_feature + alpha_feature)/2
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
             caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)                       
             query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)   
             mixture_features = query_image_features + caption_features
             mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
             composed_feature = composed_feature / composed_feature.norm(dim=-1, keepdim=True)
+            clip_feature = clip_feature / clip_feature.norm(dim=-1, keepdim=True)  
+            alpha_feature = alpha_feature / alpha_feature.norm(dim=-1, keepdim=True)  
 
             all_caption_features.append(caption_features)
+            all_pic2word_features.append(clip_feature)
+            all_alpha_features.append(alpha_feature)
             all_query_image_features.append(query_image_features)
             all_composed_features.append(composed_feature)            
             all_mixture_features.append(mixture_features)                         
@@ -623,8 +718,10 @@ def evaluate_fashion(model, model_clip, img2text, args, source_loader, target_lo
         feats = {'composed': torch.cat(all_composed_features), 
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
-                 'mixture': torch.cat(all_mixture_features)}
-        
+                 'mixture': torch.cat(all_mixture_features),
+                 'pic2word': torch.cat(all_pic2word_features),
+                 'alphaclip':torch.cat(all_alpha_features)}
+        print(f'number of no mask: {no_mask}')
         for key, value in feats.items():
             metrics = metric_func(ref_features=value)
             logging.info(
@@ -665,22 +762,47 @@ def get_metrics_fashion(image_features, ref_features, target_names, answer_names
 
 
 def get_metrics_cirr(image_features, ref_features, reference_names, index_names, target_names):
+    import os
     metrics = {}
     distances = 1 - ref_features @ image_features.T
     sorted_indices = torch.argsort(distances, dim=-1).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
-    # Delete the reference image from the results
+    # 파일 경로에서 파일명만 추출
+    sorted_basenames = np.array([[os.path.basename(name) for name in row] for row in sorted_index_names])
+    reference_basenames = np.array([name for name in reference_names])  # 이미 파일명만 있으면 그대로 사용
+    target_basenames = np.array([name for name in target_names])  # 이미 파일명만 있으면 그대로 사용
+    
+    # Delete the reference image from the results (파일명 기준 비교)
     reference_mask = torch.tensor(
-        sorted_index_names != np.repeat(np.array(reference_names), 
-        len(index_names)).reshape(len(target_names), -1))        
-    sorted_index_names = sorted_index_names[reference_mask].reshape(sorted_index_names.shape[0],
-                                                                    sorted_index_names.shape[1] - 1)
-
-    # Compute the ground-truth labels wrt the predictions
+        sorted_basenames != np.repeat(reference_basenames.reshape(-1, 1), 
+        sorted_basenames.shape[1], axis=1))
+    
+    # 각 행마다 첫 번째 일치하는 참조 이미지 항목만 제거
+    filtered_sorted_names = []
+    for i, (names_row, basenames_row, ref_name) in enumerate(zip(sorted_index_names, sorted_basenames, reference_basenames)):
+        # 참조 이미지 위치 찾기
+        ref_indices = np.where(basenames_row == ref_name)[0]
+        
+        if len(ref_indices) > 0:
+            # 첫 번째 참조 이미지만 제거
+            first_ref_idx = ref_indices[0]
+            mask = np.ones(len(names_row), dtype=bool)
+            mask[first_ref_idx] = False
+            filtered_row = names_row[mask]
+        else:
+            # 참조 이미지가 없으면 마지막 항목 제거
+            filtered_row = names_row[:-1]
+        
+        filtered_sorted_names.append(filtered_row)
+    
+    sorted_index_names = np.array(filtered_sorted_names)
+    
+    # Compute the ground-truth labels wrt the predictions (파일명 기준 비교)
+    sorted_basenames = np.array([[os.path.basename(name) for name in row] for row in sorted_index_names])
     labels = torch.tensor(
-        sorted_index_names == np.repeat(np.array(target_names), 
-        len(index_names) - 1).reshape(len(target_names), -1))
+        sorted_basenames == np.repeat(target_basenames.reshape(-1, 1), 
+        sorted_basenames.shape[1], axis=1))
 
     assert torch.equal(torch.sum(labels, dim=-1).int(), torch.ones(len(target_names)).int())
     for k in [1, 5, 10, 50, 100]:
@@ -688,6 +810,179 @@ def get_metrics_cirr(image_features, ref_features, reference_names, index_names,
 
     return metrics
 
+def evaluate_cirr_sim(model, model_clip, img2text, args, query_loader, target_loader):
+    if not is_master(args):
+        return
+    model.eval()
+    model_clip.eval()
+    img2text.eval()
+
+    all_image_features = []  
+    all_query_image_features = []  
+    all_composed_features = []  
+    all_caption_features = []  
+    all_mixture_features = []  
+    all_ref_paths = []
+    all_target_paths = []
+    all_answer_paths = []
+    all_ids = []
+
+    m = model.module if args.distributed or args.dp else model
+    m_c = model_clip.module if args.distributed or args.dp else model_clip
+    logit_scale = m.logit_scale.exp()
+    logit_scale = logit_scale.mean()   
+
+    with torch.no_grad():
+        for batch in tqdm(target_loader):
+            target_images, target_paths = batch
+            if args.gpu is not None:
+                target_images = target_images.cuda(args.gpu, non_blocking=True)
+            image_features = m_c.encode_image(target_images)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
+            all_image_features.append(image_features)
+            for path in target_paths:
+                all_target_paths.append(path)
+
+        for batch in tqdm(query_loader):
+            ref_images, ref_alphas, text_with_blank, caption_only, ref_paths, answer_paths, raw_captions = batch
+            if args.gpu is not None:
+                ref_images = ref_images.cuda(args.gpu, non_blocking=True)
+                ref_alphas = ref_alphas.cuda(args.gpu, non_blocking=True)
+                text_with_blank = text_with_blank.cuda(args.gpu, non_blocking=True)
+                caption_only = caption_only.cuda(args.gpu, non_blocking=True)
+            id_split = tokenize(["*"])[0][1]                        
+            for path in ref_paths:
+                all_ref_paths.append(path)
+            for path in answer_paths:
+                all_answer_paths.append(path)
+
+            query_image_features, _ = m.visual(ref_images, ref_alphas, return_attn=True)
+            caption_features = m.encode_text(caption_only)
+            query_image_tokens = img2text(query_image_features.unsqueeze(1))  # for QFormer          
+            composed_feature = m.encode_text_img_retrieval(text_with_blank, query_image_tokens, split_ind=id_split, repeat=False)
+            
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
+            caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)                       
+            query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)   
+            composed_feature = composed_feature / composed_feature.norm(dim=-1, keepdim=True)            
+            mixture_features = query_image_features + caption_features
+            mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
+            all_caption_features.append(caption_features)
+            all_query_image_features.append(query_image_features)
+            all_composed_features.append(composed_feature)            
+            all_mixture_features.append(mixture_features)            
+
+        all_target_paths = np.array(all_target_paths)
+        all_ref_paths = np.array(all_ref_paths)
+        all_answer_paths = np.array(all_answer_paths)
+
+        # 모든 feature 모으기
+        all_image_features_cat = torch.cat(all_image_features)
+        all_query_image_features_cat = torch.cat(all_query_image_features)
+        all_composed_features_cat = torch.cat(all_composed_features)
+        all_caption_features_cat = torch.cat(all_caption_features)
+        
+        # 새로운 weighted similarity 계산
+        # query_image와 target_image 간의 similarity 계산 (1 - distance)
+        query_image_similarity = torch.matmul(all_composed_features_cat, all_image_features_cat.t()) * logit_scale
+        
+        # caption과 target_image 간의 similarity 계산 (1 - distance)
+        caption_similarity = torch.matmul(all_caption_features_cat, all_image_features_cat.t()) * logit_scale
+        
+        # weighted similarity 계산: caption_similarity + 0.8 * query_image_similarity
+        weighted_similarity = caption_similarity + 0.8 * query_image_similarity
+
+        metric_func = partial(get_metrics_cirr, 
+                              image_features=all_image_features_cat,
+                              reference_names=all_ref_paths,
+                              index_names=all_target_paths,
+                              target_names=all_answer_paths)
+        
+        feats = {
+            'composed': all_composed_features_cat, 
+            'image': all_query_image_features_cat,
+            'text': all_caption_features_cat,
+            'mixture': torch.cat(all_mixture_features)
+        }
+        
+        metrics = {}
+        for key, value in feats.items():
+            m = metric_func(ref_features=value)
+            logging.info(
+            f"Eval {key} Feature"
+            + "\t".join([f"{k}: {v:.4f}" for k, v in m.items()]))
+            if key == 'composed':
+                metrics = m  # composed feature의 metric을 최종 반환값으로 설정
+                
+        # weighted similarity에 대한 metric 계산
+        weighted_metrics = get_metrics_from_similarity_cirr(
+            weighted_similarity,
+            reference_names=all_ref_paths,
+            index_names=all_target_paths,
+            target_names=all_answer_paths
+        )
+        logging.info(
+        f"Eval weighted Feature"
+        + "\t".join([f"{k}: {v:.4f}" for k, v in weighted_metrics.items()]))
+        
+        # weighted metrics도 반환값에 추가
+        metrics.update({'weighted_' + k: v for k, v in weighted_metrics.items()})
+        
+    return metrics
+
+# similarity 기반 metric 계산을 위한 새로운 함수
+def get_metrics_from_similarity_cirr(similarity_matrix, reference_names, index_names, target_names):
+    """
+    사전 계산된 similarity matrix를 사용하여 metrics를 계산하는 함수
+    원본 get_metrics_cirr 함수와 동일한 방식으로 동작하도록 수정
+    """
+    import os
+    metrics = {}
+    
+    # similarity에서 distance로 변환 (1 - similarity)
+    # 참고: 원래 코드에서는 cosine similarity를 사용하므로 1에서 빼서 거리로 변환
+    distances = 1 - similarity_matrix
+    
+    # distance 기준으로 정렬 (가장 작은 거리가 가장 유사함)
+    sorted_indices = torch.argsort(distances, dim=-1).cpu()
+    sorted_index_names = np.array(index_names)[sorted_indices]
+    
+    # 파일 경로에서 파일명만 추출
+    sorted_basenames = np.array([[os.path.basename(name) for name in row] for row in sorted_index_names])
+    reference_basenames = np.array([os.path.basename(name) for name in reference_names])
+    target_basenames = np.array([os.path.basename(name) for name in target_names])
+    
+    # 각 행마다 첫 번째 일치하는 참조 이미지 항목만 제거
+    filtered_sorted_names = []
+    for i, (names_row, basenames_row, ref_name) in enumerate(zip(sorted_index_names, sorted_basenames, reference_basenames)):
+        # 참조 이미지 위치 찾기
+        ref_indices = np.where(basenames_row == ref_name)[0]
+        
+        if len(ref_indices) > 0:
+            # 첫 번째 참조 이미지만 제거
+            first_ref_idx = ref_indices[0]
+            mask = np.ones(len(names_row), dtype=bool)
+            mask[first_ref_idx] = False
+            filtered_row = names_row[mask]
+        else:
+            # 참조 이미지가 없으면 마지막 항목 제거
+            filtered_row = names_row[:-1]
+        
+        filtered_sorted_names.append(filtered_row)
+    
+    sorted_index_names = np.array(filtered_sorted_names)
+    
+    # Compute the ground-truth labels wrt the predictions (파일명 기준 비교)
+    sorted_basenames = np.array([[os.path.basename(name) for name in row] for row in sorted_index_names])
+    labels = torch.tensor(
+        sorted_basenames == np.repeat(target_basenames.reshape(-1, 1), 
+        sorted_basenames.shape[1], axis=1))
+    
+    assert torch.equal(torch.sum(labels, dim=-1).int(), torch.ones(len(target_names)).int())
+    for k in [1, 5, 10, 50, 100]:
+        metrics[f"recall_R@{k}"] = (torch.sum(labels[:, :k]) / len(labels)).item() * 100
+    
+    return metrics
 
 def get_cirr_testoutput(image_features, ref_features, reference_names, index_names, id_names):
     metrics = {}

@@ -14,7 +14,7 @@ query_file: null
 eval_mode: "imgnet"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
-n_layer: 2
+n_layer: 4
 dataset_type: "grit"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r"]
 dataset_type_val: "auto"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
@@ -23,9 +23,9 @@ csv_caption_key: "caption"
 imagenet_val: null
 imagenet_v2: null
 logs: "./logs/"
-name: "lr=0.0001_wd=0.2_agg=True_model=ViT-L/14_batchsize=32_workers=0_date=2024-11-24-05-59-36"
+name: "lr=0.0001_wd=0.2_agg=True_model=ViT-L/14_batchsize=32_workers=0_date=2025-02-10"
 workers: 0
-batch_size: 32
+batch_size: 64
 epochs: 30
 lr: !!float 1e-4
 beta1: 0.0
@@ -36,13 +36,13 @@ warmup: 10000
 use_bn_sync: false
 use_debiased_sampler: false
 use_prefix: false
-gpu: 1
+gpu: 0
 skip_scheduler: false
 save_frequency: 1
 save_most_recent: false
 zeroshot_frequency: 2
 regression_frequency: 2
-resume: "auto"
+resume: "/home/work/gisub_conference/2024_dna_conference/logs/2025-02-23/epoch_30.pt"
 precision: "amp"   # ["amp", "fp16", "fp32"]
 model: "ViT-L/14"
 # ["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 

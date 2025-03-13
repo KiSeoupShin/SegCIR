@@ -51,6 +51,14 @@ import PIL
 
 from imgnet_classes import IMAGENET2012_CLASSES
 
+from eval_utils import SegmentImage
+
+import sys
+sys.path.append("/home/gisub/Desktop/2024_dna_conference/sam2")
+
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
+
 
 ## Structure of dataset directory
 ## CIRR: under ./data/CIRR
@@ -58,10 +66,12 @@ from imgnet_classes import IMAGENET2012_CLASSES
 ## caption split ./captions/cap.rc2.val.json
 ## image split ./image_splits/split.rc2.val.json
 class CIRR(Dataset):
-    def __init__(self, transforms, mode='caps', 
+    def __init__(self, transforms, transforms_mask=None, is_mask=False, mode='caps', 
     vis_mode=False, test=False, root='./data'):
         self.mode = mode
         self.transforms = transforms
+        self.transforms_mask = transforms_mask
+        self.is_mask = is_mask
         self.vis_mode = vis_mode
         ## mode to use test split of CIRR
         self.test = test
@@ -139,10 +149,17 @@ class CIRR(Dataset):
             target_cap = self.target_caps[idx]
             text_with_blank = 'a photo of * , {}'.format(target_cap)    
             caption_only = tokenize(target_cap)[0]
-            ref_text_tokens = tokenize(text_with_blank)[0]                 
-            return ref_images, ref_text_tokens, caption_only, \
-                str(self.ref_imgs[idx]), str(self.target_imgs[idx]), \
-                    target_cap                       
+            ref_text_tokens = tokenize(text_with_blank)[0] 
+            if self.is_mask:
+                alpha_path = img_path.replace('/dev/', '/mask/')
+                ref_alphas = self.transforms_mask(Image.open(alpha_path))
+                return ref_images, ref_alphas[:1, :, :], ref_text_tokens, caption_only, \
+                    str(self.ref_imgs[idx]), str(self.target_imgs[idx]), \
+                        target_cap  
+            else:
+                return ref_images, ref_text_tokens, caption_only, \
+                    str(self.ref_imgs[idx]), str(self.target_imgs[idx]), \
+                        target_cap                       
         else:
             tar_path = str(self.target_imgs[idx])
             img_path = os.path.join(self.root_img, tar_path)
@@ -171,6 +188,8 @@ class FashionIQ(Dataset):
         self.mode = mode
         self.is_return_target_path = is_return_target_path
         self.transforms = transforms
+        self.segment_model = SegmentImage()
+        self.cloth = cloth
         if mode == 'imgs':
             self.json_file = os.path.join(root_iq, 'image_splits', \
                 'split.{}.val.json'.format(cloth))
@@ -192,13 +211,13 @@ class FashionIQ(Dataset):
 
     def init_imgs(self):
         data = json.load(open(self.json_file, "r"))
-        self.target_imgs = [key + ".png" for key in data]        
+        self.target_imgs = [key + ".jpg" for key in data]        
 
     def init_data(self):
         def load_data(data):
             for d in data:
-                ref_path = os.path.join(self.root_img, d['candidate']+ ".png") 
-                tar_path = os.path.join(self.root_img, d['target']+ ".png")            
+                ref_path = os.path.join(self.root_img, d['candidate']+ ".jpg") 
+                tar_path = os.path.join(self.root_img, d['target']+ ".jpg")            
                 try:
                     Image.open(ref_path)
                     Image.open(tar_path)
@@ -226,7 +245,9 @@ class FashionIQ(Dataset):
         tar_path = str(self.target_imgs[idx])
         img_path = os.path.join(self.root_img, tar_path)
         target_images = self.transforms(Image.open(img_path))
-        return target_images, os.path.join(self.root_img, tar_path)
+        text_with_blank = 'a photo of *'
+        token_texts = tokenize(text_with_blank)[0]    
+        return target_images, token_texts, os.path.join(self.root_img, tar_path)
 
     def return_all(self, idx):
         if self.vis_mode:
@@ -234,14 +255,16 @@ class FashionIQ(Dataset):
             target_images = self.transforms(Image.open(tar_path))
             return target_images, tar_path            
         ref_images = self.transforms(Image.open(str(self.ref_imgs[idx])))
+        ref_alphas = self.segment_model.transform(str(self.ref_imgs[idx]), f"A {self.cloth}.")
+        no_mask = self.segment_model.no_mask
         target_images = self.transforms(Image.open(str(self.target_imgs[idx])))
         cap1, cap2 = self.ref_caps[idx]
         text_with_blank = 'a photo of * , {} and {}'.format(cap2, cap1)
         token_texts = tokenize(text_with_blank)[0]                
         if self.is_return_target_path:
-            return ref_images, target_images, token_texts, token_texts, \
+            return ref_images, ref_alphas, target_images, token_texts, token_texts, \
                 str(self.target_imgs[idx]), str(self.ref_imgs[idx]), \
-                    cap1
+                    cap1, no_mask
         else:
             return ref_images, target_images, text_with_blank
 
@@ -430,8 +453,14 @@ class GRITDataset(Dataset):
         self.transforms = transforms
 
         self.device = 'cuda'
-        self.sam_model = SamModel.from_pretrained("facebook/sam-vit-base").to(self.device)
-        self.sam_processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+        # self.sam_model = SamModel.from_pretrained("facebook/sam-vit-base").to(self.device)
+        # self.sam_processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+
+        self.checkpoint = "checkpoints/sam2.1_hiera_large.pt"
+        self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        self.sam_model = build_sam2(self.model_cfg, self.checkpoint)
+        self.sam_model.to(self.device)
+        self.sam_processor = SAM2ImagePredictor(self.sam_model)
 
         self.mask_transform = torchvision.transforms.Compose([
             torchvision.transforms.ToTensor(), 
@@ -453,7 +482,7 @@ class GRITDataset(Dataset):
         
         caption = data['caption']
         boxes = [[[float(i) for i in data['boxes'][1:-1].split(',')]]]
-        mask = self.get_masks(image, boxes, self.sam_processor, self.sam_model, self.device)
+        mask = self.get_masks(image, boxes)
 
         image = self.transforms(image).to(self.device)
 
@@ -462,30 +491,61 @@ class GRITDataset(Dataset):
         mask = np.array(mask)
 
         binary_maskes = (mask[0, :, :] != 0)
-        alpha = self.mask_transform((binary_maskes * 255).astype(np.uint8))
+        inverted_mask = np.logical_not(binary_maskes)
+        alpha = self.mask_transform((inverted_mask * 255).astype(np.uint8))
 
-        return image, caption, alpha
-
-
-    def get_masks(self, image, boxes, sam_processor, sam_model, device):
-        inputs = sam_processor(image, input_boxes=boxes, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = sam_model(**inputs)
-
-        masks = sam_processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu()
-        )
-
-        combined_mask = None
-        for mask in masks[0]:
-            new_mask = mask.float()
-            if combined_mask is None:
-                combined_mask = new_mask
-            else:
-                combined_mask = np.maximum(combined_mask, new_mask)
-
-        return combined_mask
+        return image, caption, alpha, data['url'], data['noun']
     
+
+    def get_masks(self, image, boxes):
+        with torch.inference_mode():
+            self.sam_processor.set_image(image)
+            masks, scores, _ = self.sam_processor.predict(
+                point_coords=None,
+                point_labels=None,
+                box=boxes,
+                multimask_output=False,
+                )
+        
+        return torch.tensor(masks)
+
+
+    # def get_masks(self, image, boxes, sam_processor, sam_model, device):
+    #     inputs = sam_processor(image, input_boxes=boxes, return_tensors="pt").to(device)
+    #     with torch.no_grad():
+    #         outputs = sam_model(**inputs)
+
+    #     masks = sam_processor.image_processor.post_process_masks(
+    #         outputs.pred_masks.cpu(), inputs["original_sizes"].cpu(), inputs["reshaped_input_sizes"].cpu()
+    #     )
+
+    #     combined_mask = None
+    #     for mask in masks[0]:
+    #         new_mask = mask.float()
+    #         if combined_mask is None:
+    #             combined_mask = new_mask
+    #         else:
+    #             combined_mask = np.maximum(combined_mask, new_mask)
+
+    #     return combined_mask
+
+
+class FeatDataset(Dataset):
+    def __init__(self, input_filename):
+        self.dataset = pd.read_csv(input_filename, sep='|')
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data = self.dataset.iloc[idx]
+        try:
+            image_features = torch.tensor(np.load(data['url']))
+        except:
+            return None
+
+        return image_features, data['noun'], data['caption']
+
 
 class AlphaDataset(Dataset):
     def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t",
@@ -716,6 +776,32 @@ def get_alpha_dataset(args, preprocess_fn, is_train, input_filename=None):
     return DataInfo(dataloader, sampler)
 
 
+def get_feat_dataset(args, preprocess_fn, is_train, input_filename=None):
+    if input_filename is None:
+        input_filename = args.train_data if is_train else args.val_data
+    assert input_filename
+    dataset = FeatDataset(input_filename=input_filename)
+        
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    shuffle = is_train and sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        # pin_memory=True,
+        sampler=sampler,
+        drop_last=is_train,
+        collate_fn=collate_fn_skip_none,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+
 def collate_fn_skip_none(batch):
     # None 값을 필터링하여 배치 생성
     batch = [item for item in batch if item is not None]
@@ -816,6 +902,8 @@ def get_dataset_fn(data_path, dataset_type):
         return get_alpha_dataset 
     elif dataset_type == 'grit':
         return get_grit_dataset
+    elif dataset_type == 'feat':
+        return get_feat_dataset
     elif dataset_type == "auto":
         ext = data_path.split('.')[-1]
         if ext in ['csv', 'tsv']:

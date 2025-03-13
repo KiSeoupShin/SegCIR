@@ -2,30 +2,32 @@
 
 # General parameters
 time_suffix: true
-train_data: './cc/GRIT_features_train_data_processed.csv'
-val_data: './cc/GRIT_caption_valid_data_v2.csv'   # 개수 issue (추후에 데이터셋 업데이트한 뒤 변경)
-prompts: null
-retrieval_data: null
-demo_out: "demo"
+train_data: './cc/dummy_train_data.csv'
+val_data: './cc/dummy_val_data.csv'
+prompts: "a photo of * that Two animals that are of a different species from the first one and no human appearing"
+prompts_to_query: "a ocean."
+retrieval_data: "cirr"
+demo_out: "demo/ocean"
 source_data: null
 target_data: null
 target_pad: false
-query_file: null
-eval_mode: "coco"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
+query_file: "./demo/query_image/dev-1042-0-img0.png"
+eval_mode: "cirr"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
-n_layer: 2
-dataset_type: "feat"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r"]
-dataset_type_val: "grit"   # ["webdataset", "csv", "inet", "auto"]
+n_layer: 5
+query_tokens: 1
+dataset_type: "grit"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r"]
+dataset_type_val: "auto"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
 csv_img_key: "img_path"
 csv_caption_key: "caption"
 imagenet_val: null
 imagenet_v2: null
 logs: "./logs/"
-name: null
+name: "2025-02-23"
 workers: 0
-batch_size: 64
+batch_size: 32
 epochs: 30
 lr: !!float 1e-4
 beta1: 0.0
@@ -42,7 +44,7 @@ save_frequency: 1
 save_most_recent: false
 zeroshot_frequency: 2
 regression_frequency: 2
-resume: null
+resume: "auto"
 precision: "amp"   # ["amp", "fp16", "fp32"]
 model: "ViT-L/14"
 # ["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 
@@ -50,8 +52,7 @@ model: "ViT-L/14"
 #                  "RN50_flat_ft", "RN50_t1_pos_ft", "RN50_t2_pos_ft", "RN50_t1_pos", "RN50_t2_pos",
 #                  "RN50_flat_large", "RN50_t1_large", "RN50_t2_large",
 #                  "RN50_a2", "RN50_a2s"]
-openai_pretrained: false
-alpha_clip: true
+openai_pretrained: true
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"

@@ -4,7 +4,7 @@
 time_suffix: true
 train_data: './cc/dummy_train_data.csv'
 val_data: './cc/dummy_val_data.csv'
-prompts: "a toy of *"
+prompts: "a cartoon of * that is playing an instrument"
 prompts_to_query: "a cat."
 retrieval_data: "imgnet"
 demo_out: "demo"

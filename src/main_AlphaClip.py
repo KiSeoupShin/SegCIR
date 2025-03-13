@@ -31,8 +31,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler
 from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT #IM_Transformer 추가
-from trainer import train
+from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER_FILM, FiLMedIM2TEXT #IM_Transformer 추가
+from trainer import train, train_features
 from data import get_data
 from params import parse_args, parse_args_from_yaml
 from logger import setup_primary_logging, setup_worker_logging
@@ -68,16 +68,16 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     preprocess_val = preprocess
 
     #Projection Module 교체
-    img2text = IM_TRANSFORMER(num_query_token=1,
+    img2text = IM_TRANSFORMER_FILM(num_query_token=1,
                             cross_attention_freq=2,
-                            embed_dim=model.token_embedding.weight.shape[1])
+                            )
     '''img2text = IM2TEXT(embed_dim=model.embed_dim, 
                         middle_dim=args.middle_dim, 
                         output_dim=model.token_embedding.weight.shape[1], 
                         n_layer=args.n_layer)'''
     # img2text = FiLMedIM2TEXT(embed_dim=model.embed_dim, 
     #                         middle_dim=args.middle_dim, 
-    #                         output_dim=model.token_embedding.weight.shape[1], 
+    #                         output_dim=model.token_embedding.weight.shape[1],
     #                         n_layer=args.n_layer)
 
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
@@ -185,7 +185,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     for epoch in range(start_epoch, args.epochs):
         if args.gpu == 0:
             logging.info(f'Start epoch {epoch}')
-        train(model, img2text, data, epoch, optimizer, scaler, scheduler, args, writer)
+        if args.dataset_type == 'feat':
+            train_features(model, img2text, data, epoch, optimizer, scaler, scheduler, args, writer)
+        else:
+            train(model, img2text, data, epoch, optimizer, scaler, scheduler, args, writer)
         steps = data["train"].dataloader.num_batches * (epoch + 1)        
         # Saving checkpoints.
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):

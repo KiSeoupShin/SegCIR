@@ -37,8 +37,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT
-from eval_utils import evaluate_imgnet_retrieval, evaluate_coco, evaluate_fashion, evaluate_cirr, evaluate_cirr_test
+from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT, IM_TRANSFORMER_FILM
+from eval_utils import evaluate_imgnet_retrieval, evaluate_coco, evaluate_fashion, evaluate_cirr, evaluate_cirr_test, evaluate_cirr_sim
 from data import CsvDataset, CustomFolder, ImageList, CsvCOCO, FashionIQ, CIRR
 from params import parse_args, parse_args_from_yaml, get_project_root
 from logger import setup_primary_logging, setup_worker_logging
@@ -62,19 +62,23 @@ def load_model(args):
     ])
 
     #IM TRANSFORMER
-    img2text = IM_TRANSFORMER(num_query_token=1,
+    #img2text = IM_TRANSFORMER(num_query_token=4,
+    #                        cross_attention_freq=2,
+    #                        embed_dim=model.token_embedding.weight.shape[1])
+
+    img2text = IM_TRANSFORMER_FILM(num_query_token=4,
                             cross_attention_freq=2,
                             embed_dim=model.token_embedding.weight.shape[1])
-
+    
     # img2text = FiLMedIM2TEXT(embed_dim=model.embed_dim, 
     #                         middle_dim=args.middle_dim, 
     #                         output_dim=model.token_embedding.weight.shape[1],
     #                         n_layer=args.n_layer)
     
-    '''img2text = IM2TEXT(embed_dim=model.embed_dim, 
-                       middle_dim=args.middle_dim, 
-                       output_dim=model.token_embedding.weight.shape[1],
-                       n_layer=args.n_layer)''' 
+    #img2text = IM2TEXT(embed_dim=model.embed_dim, 
+    #                   middle_dim=args.middle_dim, 
+    #                   output_dim=model.token_embedding.weight.shape[1],
+    #                   n_layer=args.n_layer)
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
         convert_models_to_fp32(model)
@@ -209,7 +213,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         evaluate_coco(model, model_clip, img2text, args, source_dataloader)
 
     elif args.eval_mode == 'cirr':
-        source_dataset = CIRR(transforms=preprocess_val, 
+        source_dataset = CIRR(transforms=preprocess_val, transforms_mask=preprocess_mask, is_mask=True, 
                               root=root_project)
         target_dataset = CIRR(transforms=preprocess_val, 
                               root=root_project, 
@@ -228,7 +232,8 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             num_workers=args.workers,
             pin_memory=True,
             drop_last=False)
-        evaluate_cirr(model, 
+        evaluate_cirr_sim(model,
+                      model_clip,
                       img2text, 
                       args, 
                       source_dataloader, 
@@ -279,14 +284,14 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.workers,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False)
         target_dataloader = DataLoader(
             target_dataset,
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.workers,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False)
         evaluate_fashion(model, model_clip, img2text, args, source_dataloader, target_dataloader)
     elif args.eval_mode == 'imgnet':
@@ -392,6 +397,6 @@ def main(args):
 
 
 if __name__ == "__main__":
-    config_path = "./configs/evaluation_imgnet.yml"
+    config_path = "./configs/evaluation_alphaclip.yml"
     args = parse_args_from_yaml(config_path)
     main(args)

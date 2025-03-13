@@ -179,6 +179,63 @@ def get_loss_img2text(model, img2text, images, texts, alphas, loss_img, loss_txt
     total_loss = (loss_img_val + loss_txt_val) / 2
     return total_loss
 
+def get_loss_img2text_features(model, img2text, image_features, noun, caption, loss_img, loss_txt, args, data_identifier=-1):
+    token_features = img2text(image_features)
+    text_features = get_text_features(model, token_features, args)  # default option
+    # text_features = get_text_features_add_caption(model, token_features, noun, args)
+    # text_features = get_text_features_alpha(model, texts, token_features, args)
+    # text_features = get_text_class_features(model, token_text_features, token_class_features, args)
+    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+    text_features = text_features / text_features.norm(dim=-1, keepdim=True)   
+    logit_scale = model.logit_scale.exp()
+    logit_scale = logit_scale.mean()
+    if args.distributed and args.aggregate:
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        # We gather tensors from all gpus to get more negatives to contrast with.
+        gathered_image_features = [
+            torch.zeros_like(image_features) for _ in range(world_size)
+        ]
+        gathered_text_features = [
+            torch.zeros_like(text_features) for _ in range(world_size)
+        ]
+        dist.all_gather(gathered_image_features, image_features)
+        dist.all_gather(gathered_text_features, text_features)
+
+        all_image_features = torch.cat(
+            [image_features]
+            + gathered_image_features[:rank]
+            + gathered_image_features[rank + 1 :]
+        )
+        all_text_features = torch.cat(
+            [text_features]
+            + gathered_text_features[:rank]
+            + gathered_text_features[rank + 1 :]
+        )
+
+        ground_truth = torch.arange(len(all_image_features)).long()
+        if args.gpu is not None:
+            ground_truth = ground_truth.cuda(args.gpu, non_blocking=True)
+
+        # this is needed to send gradients back everywhere.
+        # Image loss.
+        logits_per_image = logit_scale * all_image_features @ all_text_features.t()
+        loss_img_val = loss_img(logits_per_image, ground_truth)
+        logits_per_text = logits_per_image.t()
+        loss_txt_val = loss_txt(logits_per_text, ground_truth)
+    else:
+        ground_truth = torch.arange(len(image_features)).long()
+        if args.gpu is not None:
+            ground_truth = ground_truth.cuda(args.gpu, non_blocking=True)
+        # Image loss.
+        logits_per_image = logit_scale * image_features @ text_features.t()
+        loss_img_val = loss_img(logits_per_image, ground_truth)
+        logits_per_text = logit_scale * text_features @ image_features.t()
+        loss_txt_val = loss_txt(logits_per_text, ground_truth)
+    total_loss = (loss_img_val + loss_txt_val) / 2
+    return total_loss
+
 
 def train(model, img2text, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
     os.environ["WDS_EPOCH"] = str(epoch)
@@ -255,6 +312,85 @@ def train(model, img2text, data, epoch, optimizer, scaler, scheduler, args, tb_w
                 "batch_time": batch_time,
                 "scale":  m.logit_scale.data.item(),
                 "lr": optimizer.param_groups[0]["lr"]
+            }
+
+            for name, val in log_data.items():
+                name = "train/" + name
+                if tb_writer is not None:
+                    tb_writer.add_scalar(name, val, timestep)
+                if args.wandb:
+                    wandb.log({name: val, 'step': timestep})
+
+def train_features(model, img2text, data, epoch, optimizer, scaler, scheduler, args, tb_writer=None):
+    os.environ["WDS_EPOCH"] = str(epoch)
+    model.eval()
+    dataloader, sampler = data['train'].dataloader,  data['train'].sampler
+    loss_img = nn.CrossEntropyLoss()
+    loss_txt = nn.CrossEntropyLoss()
+    if args.gpu is not None:
+        loss_img = loss_img.cuda(args.gpu)
+        loss_txt = loss_txt.cuda(args.gpu)
+    if args.distributed and sampler is not None:
+        sampler.set_epoch(epoch)
+
+    num_batches_per_epoch = dataloader.num_batches
+
+    end = time.time()
+    for i, batch in enumerate(dataloader):
+        if batch is None:
+            continue
+
+        step = num_batches_per_epoch * epoch + i
+        scheduler(step)
+
+        optimizer.zero_grad()
+
+        image_features, noun, caption = batch[0], batch[1], batch[2]
+        if len(batch) == 3 and args.use_debiased_sampler:
+            data_identifier = torch.unique(batch[2])[0].numpy()
+        else:
+            data_identifier = -1
+        if args.gpu is not None:
+            image_features = image_features.cuda(args.gpu, non_blocking=True)
+
+        data_time = time.time() - end
+
+        m = model.module if args.distributed or args.dp else model
+
+        # with automatic mixed precision.
+        if args.precision == "amp":
+            with autocast():
+                loss_text = get_loss_img2text_features(m, img2text, image_features, noun, caption, loss_img, loss_txt, args, data_identifier)
+                scaler.scale(loss_text).backward()
+                scaler.step(optimizer)
+
+            scaler.update()
+
+        else:
+            loss_text = get_loss_img2text_features(m, img2text, image_features, noun, caption, loss_img, loss_txt, args, data_identifier)
+            loss_text.backward()
+            optimizer.step()
+
+        batch_time = time.time() - end
+        end = time.time()
+
+        if is_master(args) and (i % 100) == 0:
+            num_samples = i * len(image_features) * args.world_size
+            samples_per_epoch = dataloader.num_samples
+            percent_complete = 100.0 * i / num_batches_per_epoch
+            logging.info(
+                f"Train Epoch: {epoch} [{num_samples}/{samples_per_epoch} ({percent_complete:.0f}%)]\t"
+                f"Loss Text: {loss_text.item():.6f}\t"
+                f"Data (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}"
+                f"\tLR Text: {optimizer.param_groups[0]['lr']:5f}"
+            )
+
+            timestep = epoch * num_batches_per_epoch + i
+            log_data = {
+                "loss_text": loss_text.item(),
+                "data_time": data_time,
+                "batch_time": batch_time,
+                "lr_text": optimizer.param_groups[0]["lr"]
             }
 
             for name, val in log_data.items():

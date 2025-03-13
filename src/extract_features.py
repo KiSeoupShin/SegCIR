@@ -28,7 +28,7 @@ def main(args):
     new_data = []
 
     for batch in tqdm(dataloader):
-        images, texts, alphas, urls, nouns = batch['image'], batch['caption'], batch['mask'], batch['url'], batch['noun']
+        images, texts, alphas, urls, nouns = batch
         images = images.cuda(args.gpu, non_blocking=True)
         alphas = alphas.cuda(args.gpu, non_blocking=True)
 
@@ -38,13 +38,13 @@ def main(args):
         image_features = image_features.detach().cpu().numpy()
 
         for url, feature, noun, caption in zip(urls, image_features, nouns, texts):
-            new_url = url.replace('images', 'image_features').replace('jpg', 'npy')
+            new_url = url.replace('images', 'image_reverse_features').replace('jpg', 'npy')
             if not os.path.exists(new_url):
                 np.save(new_url, feature)
             new_data.append([new_url, noun, caption])
         
     new_csv = pd.DataFrame(new_data, columns=['url', 'noun', 'caption'])
-    new_csv.to_csv('cc/GRIT_features_train_data.csv', index=False, sep='|')
+    new_csv.to_csv('cc/GRIT_features_reverse_train_data.csv', index=False, sep='|')
 
 
 if __name__ == "__main__":
