@@ -1,0 +1,19 @@
+전달 사항
+모델을 학습할 때는, configs/train_alphaclip.yml 을 수정해서 학습한다.
+실행 코드는 python src/main_Alphaclip.py 를 통해 실행한다.
+
+학습 전 주의 사항
+1. Q_former를 사용할 때는 query_token 개수를 3개, 사용하지 않을 때는 1개로 지정
+2. model/alpha_clip/ 폴더에 bpe_simple_vocab_16e6.txt.gz 파일 추가
+3. checkpoints 폴더에 clip_l14_grit+mim_fultune_6xe.pth 파일 추가
+4. checkpoints 폴더에 sam2.1_hiera_large.pt 파일 추가
+
+학습해야 하는 것들
+1. Ablation mode 6가지 (맨 앞은 원래 우리 모델)
+2. Query token 개수 2~6까지 변경해가면서 학습해보기 (이거 개수는 형이 생각했을 때 이거까지만 하면 되겠다 싶은 범위까지만 해주세요)
++a 시간이 된다면 beta1, beta2, eps 도 변경해가면서 실험 (이건 필수는 아니기 때문에 시간 남으면 해주세요)
+
+추가 전달 내용
+inference 를 해야 하는 것들 전에 우선 학습이 필요한 것 먼저 코드 수정을 해서
+FLOPs & parameter 수 계산, mask 에 따른 차이, Pic2Word 와 비교 파트는 아직 수정중입니다.
+그래서 이 부분은 제가 따로 할테니, 형은 학습 먼저 해주시면 될 것 같습니다.

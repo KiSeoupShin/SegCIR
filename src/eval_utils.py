@@ -35,8 +35,12 @@ from utils import is_master
 from transformers import SamModel, SamProcessor, AutoProcessor, AutoModelForZeroShotObjectDetection
 import torchvision
 
-import sys
-sys.path.append("/home/gisub/Desktop/2024_dna_conference/sam2")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+SAM2_SRC_ROOT = os.path.join(PROJECT_ROOT, "sam2")
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+if SAM2_SRC_ROOT not in sys.path:
+    sys.path.append(SAM2_SRC_ROOT)
 
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor

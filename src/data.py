@@ -53,11 +53,18 @@ from imgnet_classes import IMAGENET2012_CLASSES
 
 from eval_utils import SegmentImage
 
-import sys
-sys.path.append("/home/gisub/Desktop/2024_dna_conference/sam2")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+SAM2_SRC_ROOT = os.path.join(PROJECT_ROOT, "sam2")
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+if SAM2_SRC_ROOT not in sys.path:
+    sys.path.append(SAM2_SRC_ROOT)
 
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+from torchvision.transforms import InterpolationMode
+BICUBIC = InterpolationMode.BICUBIC
 
 
 ## Structure of dataset directory
@@ -529,6 +536,62 @@ class GRITDataset(Dataset):
     #     return combined_mask
 
 
+class MaskDataset(Dataset):
+    def __init__(self, input_filename, transforms):
+        self.dataset = pd.read_csv(input_filename, sep='|')   
+        self.transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((224, 224), interpolation=BICUBIC),
+            torchvision.transforms.CenterCrop((224, 224)),
+            self._convert_image_to_rgb,
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+        self.device = 'cuda'
+        self.mask_transform = torchvision.transforms.Compose([
+            torchvision.transforms.ToTensor(), 
+            torchvision.transforms.Resize((224, 224)),
+            torchvision.transforms.Normalize(0.5, 0.26)
+        ])
+
+    def _convert_image_to_rgb(self,image):
+            return image.convert("RGB")
+
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        try:
+            data = self.dataset.iloc[idx]
+            image = Image.open(data['url']).convert("RGB")
+            image = self.transforms(image).to(self.device)
+            alpha = Image.open(data['mask_url'])
+            alpha = self.mask_transform(alpha)
+            alpha = alpha[:1, :, :]
+            masked_patches = self.get_masked_patches(alpha)
+            text = 'a photo of '+str(data['noun'])+' that '+str(data['caption'])
+            # text_token = tokenize(text)
+            return image, text, alpha, 'a photo of '+data['noun'], data['caption'], masked_patches
+        except:
+            return None
+    
+    def get_masked_patches(self, alpha, patch_size=14):
+        num_patches_h = alpha.shape[1] // patch_size
+        num_patches_w = alpha.shape[2] // patch_size
+
+        patches = alpha.unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size)
+        patches = patches.contiguous().view(alpha.size(0), num_patches_h, num_patches_w, patch_size, patch_size)
+
+        patch_max = patches.max(dim=-1)[0].max(dim=-1)[0]
+
+        nonzero_patches = torch.nonzero(patch_max > 0, as_tuple=True)
+
+        i_indices = nonzero_patches[1]
+        j_indices = nonzero_patches[2]
+        flattened_indices = i_indices * num_patches_w + j_indices
+        
+        return flattened_indices.tolist()
+
+
 class FeatDataset(Dataset):
     def __init__(self, input_filename):
         self.dataset = pd.read_csv(input_filename, sep='|')
@@ -744,6 +807,56 @@ def get_csv_dataset(args, preprocess_fn, is_train, input_filename=None):
 
     return DataInfo(dataloader, sampler)
 
+def get_mask_dataset(args, preprocess_fn, is_train, input_filename=None):
+    if input_filename is None:
+        input_filename = args.train_data if is_train else args.val_data
+    assert input_filename
+    dataset = MaskDataset(input_filename=input_filename, transforms=preprocess_fn)
+        
+    num_samples = len(dataset)
+    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    shuffle = is_train and sampler is None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        num_workers=args.workers,
+        # pin_memory=True,
+        sampler=sampler,
+        drop_last=is_train,
+        collate_fn=collate_fn_mask,
+    )
+    dataloader.num_samples = num_samples
+    dataloader.num_batches = len(dataloader)
+
+    return DataInfo(dataloader, sampler)
+
+def collate_fn_mask(batch):
+    batch = [item for item in batch if item is not None]
+    if len(batch) == 0:
+        return None
+
+    images = []
+    texts = []
+    alphas = []
+    nouns = []
+    captions = []
+    masked_patches = []
+    
+    for img, text, alpha, noun, caption, masked_patch in batch:
+        images.append(img)
+        texts.append(text)
+        alphas.append(alpha)
+        nouns.append(noun)
+        captions.append(caption)
+        masked_patches.append(masked_patch)
+
+    images = default_collate(images)
+    alphas = default_collate(alphas)
+    
+    return images, texts, alphas, nouns, captions, masked_patches
+
 
 def get_alpha_dataset(args, preprocess_fn, is_train, input_filename=None):
     if input_filename is None:
@@ -903,6 +1016,8 @@ def get_dataset_fn(data_path, dataset_type):
         return get_grit_dataset
     elif dataset_type == 'feat':
         return get_feat_dataset
+    elif dataset_type == 'mask':
+        return get_mask_dataset
     elif dataset_type == "auto":
         ext = data_path.split('.')[-1]
         if ext in ['csv', 'tsv']:

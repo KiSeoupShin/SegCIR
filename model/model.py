@@ -47,26 +47,37 @@ class FiLMGenerator(nn.Module):
 
 #Projection module transformer 버전
 class IM_TRANSFORMER(nn.Module): 
-    def __init__(self,num_query_token=32, cross_attention_freq=2, vision_width=768, embed_dim=512): 
+    def __init__(self, input_dim=1024, num_query_token=32, cross_attention_freq=2, vision_width=768, embed_dim=512, layer_norm = True): 
         super().__init__() 
         self.tokenizer = self.init_tokenizer() 
         self.Qformer, self.query_tokens = self.init_Qformer( num_query_token, vision_width, cross_attention_freq ) 
         self.Qformer.resize_token_embeddings(len(self.tokenizer)) 
         state_dict = self.Qformer.state_dict() 
+        self.qformer_hidden_size = self.Qformer.config.hidden_size
+        self.input_dim = input_dim
+        if layer_norm:
+            self.layer_norm = nn.LayerNorm(self.qformer_hidden_size)
+        else:
+            self.layer_norm = None
         
         for name, param in self.Qformer.named_parameters(): 
             if "_query" in name: 
                 key_orig = name.replace("_query", "") 
                 param.data.copy_(state_dict[key_orig]) 
+        
+        self.proj = None
+        if input_dim != self.qformer_hidden_size:
+            self.proj = nn.Linear(input_dim, self.qformer_hidden_size)
         self.film_generator = FiLMGenerator(embed_dim, 2 * embed_dim) 
         self.vision_proj = nn.Linear(self.Qformer.config.hidden_size, embed_dim) 
-    
+
     def init_tokenizer(self,truncation_side="right"): 
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side) 
         tokenizer.add_special_tokens({"bos_token": "[DEC]"}) 
         return tokenizer 
     
     def init_Qformer(self,num_query_token, vision_width, cross_attention_freq): 
+        from transformers import BertConfig, BertLMHeadModel
         encoder_config = BertConfig.from_pretrained("bert-base-uncased") 
         encoder_config.encoder_width = vision_width 
         # insert cross-attention layer every other block 
@@ -82,12 +93,23 @@ class IM_TRANSFORMER(nn.Module):
     def forward(self, x: torch.Tensor): 
         if len(x.shape) == 2: 
             x = x.unsqueeze(1) 
-        image_embeds = x #(batch,1,embedding_dim) 
-        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to('cuda') 
+        if x.shape[-1] != self.qformer_hidden_size:
+            if self.proj is None:
+                raise ValueError(
+                    f"IM_TRANSFORMER input dim mismatch: got {x.shape[-1]}, "
+                    f"expected {self.qformer_hidden_size}, and projection is not initialized."
+                )
+            x = self.proj(x)
+        if self.layer_norm is not None:
+            image_embeds = self.layer_norm(x)
+        else:
+            image_embeds = x #(batch,1,embedding_dim) 
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(x.device) 
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1) #(64,4,embedding_dim) 
         query_output = self.Qformer.bert( inputs_embeds=query_tokens, encoder_hidden_states=image_embeds, encoder_attention_mask=image_atts, use_cache=True, return_dict=True, ) 
-        gamma, beta = self.film_generator(image_embeds) 
-        x = gamma * query_output.last_hidden_state + beta 
+        gamma, beta = self.film_generator(image_embeds[:,:32,:]) 
+        #x = gamma * query_output.last_hidden_state + beta 
+        x = query_output.last_hidden_state
         image_feats = F.normalize( self.vision_proj(x), dim=-1 ) 
         return image_feats
 
@@ -579,8 +601,21 @@ class CLIP(nn.Module):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
         collect_ind = text == self.end_id 
         collect_ind = collect_ind.nonzero()[:, 1]
-        img_tokens = img_tokens.view(b_size, 1, -1)
-        x = torch.cat([x[:, :collect_ind[0]], img_tokens, x[:, collect_ind[0]:-1]], dim=1)
+
+        if img_tokens.dim() == 2:
+            img_tokens = img_tokens.view(b_size, 1, -1)
+        elif img_tokens.dim() != 3:
+            raise ValueError(f"Unexpected img_tokens shape: {tuple(img_tokens.shape)}")
+
+        insert_idx = int(collect_ind[0].item())
+        q = img_tokens.size(1)
+        max_insert = x.size(1) - insert_idx
+        if q > max_insert:
+            img_tokens = img_tokens[:, :max_insert, :]
+            q = img_tokens.size(1)
+
+        # Keep sequence length fixed: insert q visual tokens, drop q tail tokens.
+        x = torch.cat([x[:, :insert_idx], img_tokens, x[:, insert_idx:-q]], dim=1)
         x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
@@ -588,7 +623,7 @@ class CLIP(nn.Module):
         x = self.ln_final(x).type(self.dtype)
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)    
-        x = x[torch.arange(x.size(0)), collect_ind+1] @ self.text_projection
+        x = x[torch.arange(x.size(0)), collect_ind + q] @ self.text_projection
         return x              
     
     def encode_text_img_vis(self, text, img_tokens, split_ind=4):
@@ -748,3 +783,213 @@ def build_model(state_dict: dict):
     convert_weights(model)
     model.load_state_dict(state_dict)
     return model.eval()
+
+class IM_TRANSFORMER_BLIP_CUSTOM(nn.Module):
+    def __init__(self,num_query_token=32,
+                    cross_attention_freq=2,
+                    vision_width=1024,
+                    embed_dim=768):
+        super().__init__()
+        self.tokenizer = self.init_tokenizer()
+
+        self.Qformer, self.query_tokens = self.init_Qformer(
+            num_query_token, vision_width, cross_attention_freq
+        )
+        self.Qformer.resize_token_embeddings(len(self.tokenizer))
+        # if num_query_token == 32:
+        #     self.load_blip_weights()
+
+        self.num_film_layers = cross_attention_freq
+        self.hidden_size = self.Qformer.config.hidden_size
+        self.film_generator = FiLMGenerator(
+            condition_dim=embed_dim,
+            n_film_params=2 * self.num_film_layers * self.hidden_size,
+        )
+        self.vision_proj = nn.Linear(self.Qformer.config.hidden_size, embed_dim)
+
+        # scale = vision_width ** -0.5
+        # self.proj = nn.Parameter(scale * torch.randn(vision_width, vision_width))
+    
+    def init_tokenizer(self,truncation_side="right"):
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
+        tokenizer.add_special_tokens({"bos_token": "[DEC]"})
+        return tokenizer
+    
+    def init_Qformer(self,num_query_token, vision_width, cross_attention_freq):
+        from lavis.models.blip2_models.Qformer import BertConfig
+        from model.cross_attention_bert import CrossAttentionOnlyBertLMHeadModel
+        encoder_config = BertConfig.from_pretrained("bert-base-uncased")
+        encoder_config.encoder_width = vision_width
+        # insert cross-attention layer every other block
+        encoder_config.add_cross_attention = True
+        encoder_config.is_decoder=True
+        encoder_config.cross_attention_freq = cross_attention_freq
+        encoder_config.num_hidden_layers = cross_attention_freq
+        encoder_config.query_length = num_query_token
+        encoder_config._attn_implementation = 'eager'
+        Qformer = CrossAttentionOnlyBertLMHeadModel.from_pretrained(
+            "bert-base-uncased", config=encoder_config
+        )
+        query_tokens = nn.Parameter(
+            torch.zeros(1, num_query_token, encoder_config.hidden_size)
+        )
+        query_tokens.data.normal_(mean=0.0, std=encoder_config.initializer_range)
+        return Qformer, query_tokens
+    
+    def load_blip_weights(self):
+        blip_model, _, _  = load_model_and_preprocess("blip2", "pretrain_vitL", device='cuda', is_eval=True)
+        # BLIP 모델에서 Qformer 가중치 로드
+        blip_state_dict = blip_model.Qformer.state_dict()
+        
+        # 현재 Qformer에 BLIP의 가중치 적용
+        missing_keys, unexpected_keys = self.Qformer.load_state_dict(blip_state_dict, strict=False)
+        
+        # query_tokens도 BLIP에서 로드
+        if hasattr(blip_model, 'query_tokens'):
+            self.query_tokens.data.copy_(blip_model.query_tokens.data)
+            
+        # GPU 메모리에서 blip_model 제거
+        del blip_state_dict
+        del blip_model
+        torch.cuda.empty_cache()
+
+    def _build_film_lists(self, film_condition: torch.Tensor, query_len: int):
+        batch_size = film_condition.shape[0]
+        gamma, beta = self.film_generator(film_condition)
+        gamma = gamma.view(batch_size, self.num_film_layers, self.hidden_size)
+        beta = beta.view(batch_size, self.num_film_layers, self.hidden_size)
+        gamma = gamma.unsqueeze(2).expand(-1, -1, query_len, -1)
+        beta = beta.unsqueeze(2).expand(-1, -1, query_len, -1)
+        gamma_list = [gamma[:, i, :, :] for i in range(self.num_film_layers)]
+        beta_list = [beta[:, i, :, :] for i in range(self.num_film_layers)]
+        return gamma_list, beta_list
+    
+    def forward(self, x: torch.Tensor, film_condition: torch.Tensor):
+        # x의 shape이 [batch, 256, embedding_dim]인 경우 처리
+        batch_size = x.shape[0]
+        
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+            
+        image_embeds = x  # (batch, seq_len, embedding_dim)
+        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(x.device)
+        query_tokens = self.query_tokens.expand(batch_size, -1, -1)  # (batch, num_query_token, embedding_dim)
+        if hasattr(self, "proj"):
+            image_embeds = image_embeds @ self.proj
+
+        gamma, beta = self._build_film_lists(film_condition, query_tokens.shape[1])
+
+        query_output = self.Qformer.bert(
+            inputs_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=None,
+            use_cache=True,
+            return_dict=True,
+            gamma_list=gamma,
+            beta_list=beta,
+        )
+
+        # 정규화 및 프로젝션
+        image_feats = F.normalize(
+            self.vision_proj(query_output.last_hidden_state), dim=-1
+        )
+        return image_feats
+
+class IM_TRANSFORMER_FILM_CUSTOM(nn.Module): 
+    def __init__(self,num_query_token=32, cross_attention_freq=3, vision_width=768, embed_dim=768): 
+        super().__init__() 
+        self.tokenizer = self.init_tokenizer() 
+        self.num_layers = cross_attention_freq
+        self.vision_width = vision_width
+        self.Qformer, self.query_tokens = self.init_Qformer( num_query_token, vision_width, cross_attention_freq ) 
+        self.Qformer.resize_token_embeddings(len(self.tokenizer)) 
+        state_dict = self.Qformer.state_dict() 
+        
+        for name, param in self.Qformer.named_parameters(): 
+            if "_query" in name: 
+                key_orig = name.replace("_query", "") 
+                param.data.copy_(state_dict[key_orig]) 
+        self.vision_proj = nn.Linear(self.Qformer.config.hidden_size, embed_dim) 
+        # NOTE:
+        # In our custom cross-attention stack, key/value projection can still expect
+        # BERT hidden size (768). Project visual tokens when CLIP width differs
+        # (e.g., ViT-L/14 token width 1024) to avoid matmul shape mismatch.
+        self.encoder_input_proj = None
+        if self.vision_width != self.Qformer.config.hidden_size:
+            self.encoder_input_proj = nn.Linear(self.vision_width, self.Qformer.config.hidden_size)
+
+        self.num_film_layers = cross_attention_freq
+        self.hidden_size = self.Qformer.config.hidden_size
+        self.film_generator = FiLMGenerator(
+            condition_dim=embed_dim,
+            n_film_params=2 * self.num_film_layers * self.hidden_size,
+        )
+    
+    def init_tokenizer(self,truncation_side="right"):
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
+        tokenizer.add_special_tokens({"bos_token": "[DEC]"})
+        return tokenizer
+    
+    def init_Qformer(self,num_query_token, vision_width, cross_attention_freq):
+        from transformers import BertConfig
+        from model.cross_attention_bert import CrossAttentionOnlyBertLMHeadModel
+        encoder_config = BertConfig.from_pretrained("bert-base-uncased")
+        encoder_config.encoder_width = vision_width
+        # insert cross-attention layer every other block
+        encoder_config.add_cross_attention = True
+        encoder_config.is_decoder=True
+        encoder_config.num_hidden_layers = cross_attention_freq
+        encoder_config.query_length = num_query_token
+        encoder_config._attn_implementation = 'eager'
+        # encoder_config.position_embedding_type = 'relative_key_query'
+        Qformer = CrossAttentionOnlyBertLMHeadModel.from_pretrained(
+            "bert-base-uncased", config=encoder_config
+        )
+        query_tokens = nn.Parameter(
+            torch.zeros(1, num_query_token, encoder_config.hidden_size)
+        )
+        query_tokens.data.normal_(mean=0.0, std=encoder_config.initializer_range)
+        return Qformer, query_tokens
+    
+    def forward(self, x: torch.Tensor, film_condition: torch.Tensor):
+        # x의 shape이 [batch, 256, embedding_dim]인 경우 처리
+        batch_size = x.shape[0]
+        seq_len = x.shape[1] if len(x.shape) > 2 else 1
+        
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+            
+        image_embeds = x  # (batch, seq_len, embedding_dim)
+        if image_embeds.shape[-1] != self.Qformer.config.hidden_size:
+            if self.encoder_input_proj is None:
+                raise ValueError(
+                    f"Unexpected encoder hidden size {image_embeds.shape[-1]} "
+                    f"(expected {self.Qformer.config.hidden_size})."
+                )
+            image_embeds = self.encoder_input_proj(image_embeds)
+        # image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to('cuda')
+        query_tokens = self.query_tokens.expand(batch_size, -1, -1)  # (batch, num_query_token, embedding_dim)
+
+        gamma, beta = self.film_generator(film_condition)
+        gamma = gamma.view(batch_size, self.num_film_layers, self.hidden_size)
+        beta = beta.view(batch_size, self.num_film_layers, self.hidden_size)
+        gamma = gamma.unsqueeze(2).expand(-1, -1, query_tokens.shape[1], -1)
+        beta = beta.unsqueeze(2).expand(-1, -1, query_tokens.shape[1], -1)
+        gamma = [gamma[:, i, :, :] for i in range(self.num_film_layers)]
+        beta = [beta[:, i, :, :] for i in range(self.num_film_layers)]
+
+        query_output = self.Qformer.bert(
+            inputs_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=None,
+            use_cache=True,
+            return_dict=True,
+            gamma_list=gamma,
+            beta_list=beta,
+        )
+
+        # 정규화 및 프로젝션
+        image_feats = F.normalize(
+            self.vision_proj(query_output.last_hidden_state), dim=-1
+        )
+        return image_feats

@@ -2,7 +2,7 @@
 
 # General parameters
 time_suffix: true
-train_data: './cc/GRIT_caption_train_data_v4.csv'
+train_data: './cc/GRIT_mask_train_filtered.csv'
 val_data: './cc/GRIT_caption_valid_data_v2.csv'   # 개수 issue (추후에 데이터셋 업데이트한 뒤 변경)
 prompts: null
 retrieval_data: null
@@ -15,8 +15,9 @@ eval_mode: "coco"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
 n_layer: 2
-dataset_type: "feat"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "grit", "feat"]
-dataset_type_val: "grit"   # ["webdataset", "csv", "inet", "auto"]
+query_tokens: 1    ##### Major revision parameter tuning required (2 ~ 6 정도에서 고민) #####
+dataset_type: "mask"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "grit", "feat"]
+dataset_type_val: "mask"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
 csv_img_key: "img_path"
 csv_caption_key: "caption"
@@ -25,12 +26,12 @@ imagenet_v2: null
 logs: "./logs/"
 name: null
 workers: 0
-batch_size: 64
+batch_size: 32
 epochs: 30
 lr: !!float 1e-4
-beta1: 0.0
-beta2: 0.99
-eps: !!float 1e-9
+beta1: 0.0    ##### Major revision parameter tuning required #####
+beta2: 0.99   ##### Major revision parameter tuning required #####
+eps: !!float 1e-9   ##### Major revision parameter tuning required #####
 wd: 0.2
 warmup: 10000
 use_bn_sync: false
@@ -52,6 +53,7 @@ model: "ViT-L/14"
 #                  "RN50_a2", "RN50_a2s"]
 openai_pretrained: false
 alpha_clip: true
+ablation_mode: "alpha_film"  ##### [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only] #####
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"

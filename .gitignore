@@ -5,7 +5,7 @@
 *.tar
 *.ipynb
 *.pt
-*.csv
+*.pth
 *.tsv
 
 ## folder

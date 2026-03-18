@@ -122,6 +122,14 @@ def get_text_features_only_caption(model, texts, args):
     text_features = model.encode_text(texts)
     return text_features
 
+
+def get_film_condition_features(model, texts, args):
+    # FiLM condition should use raw captions and allow truncation for long samples.
+    texts = tokenize([t for t in texts], truncate=True)
+    texts = texts.cuda(args.gpu, non_blocking=True)
+    text_features = model.encode_text(texts)
+    return text_features
+
 def get_text_class_features(model, text_features, class_features, args):
     text = tokenize("a photo of")
     text = text.cuda(args.gpu, non_blocking=True)
@@ -130,10 +138,78 @@ def get_text_class_features(model, text_features, class_features, args):
     text_features = model.encode_text_class(text, text_features, class_features)
     return text_features
 
+
+def _normalize_token_features_for_text(model, token_features, args, use_qformer=True):
+    # encode_text_img expects [B, q, D]. Keep q aligned with query_tokens.
+    if token_features.dim() == 2:
+        token_features = token_features.unsqueeze(1)
+    elif token_features.dim() != 3:
+        raise ValueError(f"Unexpected token_features shape: {tuple(token_features.shape)}")
+
+    max_q = max(1, model.context_length - 2)
+    target_q = max(1, int(getattr(args, "query_tokens", 1))) if use_qformer else 1
+    q = token_features.size(1)
+
+    if q > max_q:
+        token_features = token_features[:, :max_q, :]
+        q = token_features.size(1)
+
+    if q > target_q:
+        token_features = token_features[:, :target_q, :]
+    elif q < target_q:
+        repeat_count = target_q - q
+        token_features = torch.cat(
+            [token_features, token_features[:, -1:, :].repeat(1, repeat_count, 1)], dim=1
+        )
+
+    return token_features
+
 def get_loss_img2text(model, img2text, images, texts, alphas, loss_img, loss_txt, args, memory=None):
+    use_alpha_clip = getattr(args, "use_alpha_clip", True)
+    use_qformer = getattr(args, "use_qformer", True)
+    use_film = getattr(args, "use_film", True)
+
     with torch.no_grad():
-        image_features, _ = model.visual(images, alphas, return_attn=True)
-    token_features = img2text(image_features) #qformer를 위해 unsqueeze 추가!!
+        if use_alpha_clip:
+            # Always compute global feature first.
+            visual_outputs = model.visual(images, alphas, return_attn=False)
+            image_features = visual_outputs[0] if isinstance(visual_outputs, tuple) else visual_outputs
+
+            # Token-level states are only needed in Q-Former + FiLM mode.
+            if use_qformer and use_film:
+                if (
+                    isinstance(visual_outputs, tuple)
+                    and len(visual_outputs) > 1
+                    and isinstance(visual_outputs[1], torch.Tensor)
+                    and visual_outputs[1].dim() == 3
+                ):
+                    hidden_states = visual_outputs[1]
+                else:
+                    hidden_states = image_features.unsqueeze(1)
+        else:
+            # CLIP path (no alpha). Token-level features are computed only when needed.
+            image_features = model.visual(images.type(model.dtype))
+            if use_qformer and use_film:
+                if hasattr(model.visual, "get_tokens"):
+                    hidden_states = model.visual.get_tokens(images.type(model.dtype))
+                else:
+                    hidden_states = image_features.unsqueeze(1)
+
+        if use_qformer and use_film:
+            film_condition = get_film_condition_features(model, texts, args)
+        else:
+            film_condition = None
+
+    # Ablation-mode dependent img2text input routing.
+    if use_qformer and use_film:
+        token_features = img2text(hidden_states, film_condition)
+    else:
+        token_features = img2text(image_features)
+
+    token_features = _normalize_token_features_for_text(
+        model, token_features, args, use_qformer=use_qformer
+    )
+
     text_features = get_text_features(model, token_features, args)  # default option
     # text_features = get_text_features_add_caption(model, token_features, texts, args)
     # text_features = get_text_features_alpha(model, texts, token_features, args)
@@ -194,6 +270,9 @@ def get_loss_img2text_features(model, img2text, image_features, noun, caption, l
     noun_features += 1.0 * torch.rand(noun_features.shape[0], device=noun_features.device).unsqueeze(-1) * torch.randn(noun_features.shape, device=noun_features.device)
     image_features = torch.add(image_features, noun_features)
     token_features = img2text(image_features.unsqueeze(1))
+    token_features = _normalize_token_features_for_text(
+        model, token_features, args, use_qformer=getattr(args, "use_qformer", True)
+    )
     text_features = get_text_features(model, token_features, args)  # default option
     # text_features = get_text_features_add_caption(model, token_features, noun, args)
     # text_features = get_text_features_alpha(model, texts, token_features, args)

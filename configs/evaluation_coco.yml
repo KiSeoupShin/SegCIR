@@ -15,6 +15,7 @@ eval_mode: "coco"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
 n_layer: 2
+query_tokens: 1
 dataset_type: "grit"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r"]
 dataset_type_val: "auto"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
@@ -51,6 +52,7 @@ model: "ViT-L/14"
 #                  "RN50_flat_large", "RN50_t1_large", "RN50_t2_large",
 #                  "RN50_a2", "RN50_a2s"]
 openai_pretrained: true
+ablation_mode: "alpha_qformer_film"  # [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only]
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"

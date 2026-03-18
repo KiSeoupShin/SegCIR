@@ -31,7 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler
 from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT #IM_Transformer 추가
+from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, IM_TRANSFORMER_BLIP_CUSTOM, IM_TRANSFORMER_FILM_CUSTOM, FiLMedIM2TEXT #IM_Transformer 추가
 from trainer import train, train_features
 from data import get_data
 from params import parse_args, parse_args_from_yaml
@@ -41,14 +41,44 @@ import torchvision.transforms as T
 
 import model.alpha_clip as alpha_clip
 
+ABLATION_MODE_MAP = {
+    "alpha_qformer_film": {"use_alpha_clip": True, "use_qformer": True, "use_film": True},
+    "alpha_qformer": {"use_alpha_clip": True, "use_qformer": True, "use_film": False},
+    "alpha_film": {"use_alpha_clip": True, "use_qformer": False, "use_film": True},
+    "qformer_film": {"use_alpha_clip": False, "use_qformer": True, "use_film": True},
+    "alpha_only": {"use_alpha_clip": True, "use_qformer": False, "use_film": False},
+    "qformer_only": {"use_alpha_clip": False, "use_qformer": True, "use_film": False},
+    "film_only": {"use_alpha_clip": False, "use_qformer": False, "use_film": True},
+}
+
+
+def apply_ablation_mode(args):
+    mode = getattr(args, "ablation_mode", "alpha_qformer_film")
+    if mode not in ABLATION_MODE_MAP:
+        raise ValueError(
+            f"Unknown ablation_mode='{mode}'. "
+            f"Available: {list(ABLATION_MODE_MAP.keys())}"
+        )
+    flags = ABLATION_MODE_MAP[mode]
+    args.use_alpha_clip = flags["use_alpha_clip"]
+    args.use_qformer = flags["use_qformer"]
+    args.use_film = flags["use_film"]
+    if not hasattr(args, "query_tokens"):
+        args.query_tokens = 1
+    if not args.use_qformer:
+        args.query_tokens = 1
+    return mode, flags
+
 def main_worker(gpu, ngpus_per_node, log_queue, args):
     args.gpu = gpu
     args.rank = gpu
     setup_worker_logging(args.rank, log_queue, args.log_level)
+    ablation_mode, ablation_flags = apply_ablation_mode(args)
 
     # Log and save params.
     if is_master(args):
         logging.info("Params:")
+        logging.info(f"Ablation mode: {ablation_mode} -> {ablation_flags}")
         params_file = os.path.join(args.logs, args.name, "params.txt")
         with open(params_file, "w") as f:
             for name in sorted(vars(args)):
@@ -60,25 +90,72 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         logging.info(f"Use GPU: {args.gpu} for training")
         torch.cuda.set_device(args.gpu)
 
-    # Load AlphaCLIP
-    model, preprocess = alpha_clip.load("ViT-L/14", device='cpu', 
-                                        alpha_vision_ckpt_pth="./checkpoints/clip_l14_grit+mim_fultune_6xe.pth", 
-                                        lora_adapt=False, rank=-1)
-    preprocess_train = preprocess
-    preprocess_val = preprocess
+    if args.use_alpha_clip:
+        model, preprocess = alpha_clip.load(
+            args.model,
+            device="cpu",
+            alpha_vision_ckpt_pth="./checkpoints/clip_l14_grit+mim_fultune_6xe.pth",
+            lora_adapt=False,
+            rank=-1,
+        )
+        preprocess_train = preprocess
+        preprocess_val = preprocess
+    else:
+        model, preprocess_train, preprocess_val = load(args.model, device="cpu", jit=False)
 
     #Projection Module 교체
     # img2text = IM_TRANSFORMER(num_query_token=1,
     #                         cross_attention_freq=2,
     #                         embed_dim=model.token_embedding.weight.shape[1])
-    '''img2text = IM2TEXT(embed_dim=model.embed_dim, 
-                        middle_dim=args.middle_dim, 
-                        output_dim=model.token_embedding.weight.shape[1], 
-                        n_layer=args.n_layer)'''
-    img2text = FiLMedIM2TEXT(embed_dim=model.embed_dim, 
-                            middle_dim=args.middle_dim, 
-                            output_dim=model.token_embedding.weight.shape[1], 
-                            n_layer=args.n_layer)
+    if args.use_qformer and args.use_film:
+        # Q-Former + FiLM:
+        # - Alpha-CLIP uses BLIP-style custom path.
+        # - CLIP uses standard custom path aligned with CLIP visual token width.
+        if args.use_alpha_clip:
+            img2text = IM_TRANSFORMER_BLIP_CUSTOM(
+                num_query_token=args.query_tokens,
+                cross_attention_freq=3,
+                embed_dim=model.token_embedding.weight.shape[1],
+            )
+        else:
+            qformer_input_dim = (
+                model.visual.conv1.out_channels if hasattr(model.visual, "conv1") else model.embed_dim
+            )
+            img2text = IM_TRANSFORMER_FILM_CUSTOM(
+                num_query_token=args.query_tokens,
+                cross_attention_freq=3,
+                vision_width=qformer_input_dim,
+                embed_dim=model.token_embedding.weight.shape[1],
+            )
+    elif args.use_qformer and (not args.use_film):
+        # Q-Former only
+        qformer_input_dim = model.embed_dim if args.use_alpha_clip else (
+            model.visual.conv1.out_channels if hasattr(model.visual, "conv1") else model.embed_dim
+        )
+        img2text = IM_TRANSFORMER(
+            input_dim=qformer_input_dim,
+            num_query_token=args.query_tokens,
+            cross_attention_freq=3,
+            vision_width=1024,
+            embed_dim=model.token_embedding.weight.shape[1],
+        )
+    elif (not args.use_qformer) and args.use_film:
+        # FiLM only
+        img2text = FiLMedIM2TEXT(
+            embed_dim=model.embed_dim,
+            middle_dim=args.middle_dim,
+            output_dim=model.token_embedding.weight.shape[1],
+            output_tokens=args.query_tokens,
+            n_layer=args.n_layer,
+        )
+    else:
+        # No Q-Former, No FiLM
+        img2text = IM2TEXT(
+            embed_dim=model.embed_dim,
+            middle_dim=args.middle_dim,
+            output_dim=model.token_embedding.weight.shape[1],
+            n_layer=args.n_layer,
+        )
 
     # See https://discuss.pytorch.org/t/valueerror-attemting-to-unscale-fp16-gradients/81372
     if args.precision == "amp" or args.precision == "fp32" or args.gpu is None:
@@ -222,16 +299,37 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
 
 
 def main(args):
+    env_ablation_mode = os.getenv("ABLATION_MODE")
+    if env_ablation_mode:
+        args.ablation_mode = env_ablation_mode
+
+    ablation_mode = getattr(args, "ablation_mode", "alpha_qformer_film")
+    if ablation_mode not in ABLATION_MODE_MAP:
+        raise ValueError(
+            f"Unknown ablation_mode='{ablation_mode}'. "
+            f"Available: {list(ABLATION_MODE_MAP.keys())}"
+        )
+    ablation_flags = ABLATION_MODE_MAP[ablation_mode]
+    ablation_signature = (
+        f"alpha-{'on' if ablation_flags['use_alpha_clip'] else 'off'}_"
+        f"qformer-{'on' if ablation_flags['use_qformer'] else 'off'}_"
+        f"film-{'on' if ablation_flags['use_film'] else 'off'}"
+    )
+
     # get the name of the experiments
     if args.name is None:
-        args.name = (f"lr={args.lr}_"
+        run_name = (f"lr={args.lr}_"
             f"wd={args.wd}_"
             f"agg={args.aggregate}_"
             f"model={args.model}_"
             f"batchsize={args.batch_size}_workers={args.workers}")
         if args.time_suffix:
-            args.name += "_date=%Y-%m-%d-%H-%M-%S"
-            args.name = strftime(args.name, gmtime())
+            run_name += "_date=%Y-%m-%d-%H-%M-%S"
+            run_name = strftime(run_name, gmtime())
+    else:
+        run_name = args.name
+
+    args.name = os.path.join("ablation_mode", ablation_mode, ablation_signature, run_name)
 
     args.log_path = os.path.join(args.logs, args.name, "out.log")
     if os.path.exists(args.log_path) and args.resume is None:
