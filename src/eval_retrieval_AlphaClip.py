@@ -96,17 +96,35 @@ def load_model(args):
         transforms.Normalize(0.5, 0.26)
     ])
 
-    if args.use_qformer:
+    if args.use_qformer and args.use_film:
+        if args.use_alpha_clip:
+            img2text = IM_TRANSFORMER_BLIP_CUSTOM(
+                num_query_token=args.query_tokens,
+                cross_attention_freq=3,
+                embed_dim=model.token_embedding.weight.shape[1],
+            )
+        else:
+            qformer_input_dim = (
+                model.visual.conv1.out_channels if hasattr(model.visual, "conv1") else model.embed_dim
+            )
+            img2text = IM_TRANSFORMER_FILM_CUSTOM(
+                num_query_token=args.query_tokens,
+                cross_attention_freq=3,
+                vision_width=qformer_input_dim,
+                embed_dim=model.token_embedding.weight.shape[1],
+            )
+    elif args.use_qformer and (not args.use_film):
         qformer_input_dim = model.embed_dim if args.use_alpha_clip else (
             model.visual.conv1.out_channels if hasattr(model.visual, "conv1") else model.embed_dim
         )
         img2text = IM_TRANSFORMER(
+            input_dim=qformer_input_dim,
             num_query_token=args.query_tokens,
             cross_attention_freq=3,
-            vision_width=qformer_input_dim,
+            vision_width=1024,
             embed_dim=model.token_embedding.weight.shape[1],
         )
-    elif args.use_film:
+    elif (not args.use_qformer) and args.use_film:
         img2text = FiLMedIM2TEXT(
             embed_dim=model.embed_dim,
             middle_dim=args.middle_dim,
