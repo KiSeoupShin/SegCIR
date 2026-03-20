@@ -4,7 +4,7 @@
 time_suffix: true
 train_data: './cc/dummy_train_data.csv'
 val_data: './cc/dummy_val_data.csv'
-eval_data: 'mnt/vc-nfs/sshan'
+eval_data: '/mnt/vc-nfs/sshan'
 prompts: null
 retrieval_data: null
 demo_out: "demo"
@@ -25,7 +25,7 @@ csv_caption_key: "caption"
 imagenet_val: null
 imagenet_v2: null
 logs: "./logs/"
-name: "lr=0.0001_wd=0.2_agg=True_model=ViT-L/14_batchsize=32_workers=0_date=2026-03-18-15-27-47"
+name: "alpha_qformer_film" #로그 저장을 위한 이름 수정
 workers: 0
 batch_size: 32
 epochs: 30
@@ -44,7 +44,7 @@ save_frequency: 1
 save_most_recent: false
 zeroshot_frequency: 2
 regression_frequency: 2
-resume: "/home/sshan/project/SegCIR/logs/ablation_mode/alpha_qformer/alpha-on_qformer-on_film-off/lr=0.0001_wd=0.2_agg=True_model=ViT-L/14_batchsize=32_workers=0_date=2026-03-18-15-27-47/checkpoints/epoch_24.pt"
+resume: null #모델 pt 파일 경로
 precision: "amp"   # ["amp", "fp16", "fp32"]
 model: "ViT-L/14"
 # ["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 
@@ -53,7 +53,7 @@ model: "ViT-L/14"
 #                  "RN50_flat_large", "RN50_t1_large", "RN50_t2_large",
 #                  "RN50_a2", "RN50_a2s"]
 openai_pretrained: true
-ablation_mode: "alpha_qformer"  # [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only]
+ablation_mode: "alpha_qformer_film"  # [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only]
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"

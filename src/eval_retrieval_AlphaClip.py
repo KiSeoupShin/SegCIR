@@ -37,7 +37,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT, MultipleIM2TEXT
+from model.model import convert_weights, CLIP, IM2TEXT, IM_TRANSFORMER, FiLMedIM2TEXT, IM_TRANSFORMER_BLIP_CUSTOM, IM_TRANSFORMER_FILM_CUSTOM
 from eval_utils import evaluate_imgnet_retrieval, evaluate_coco, evaluate_fashion, evaluate_cirr, evaluate_cirr_test
 from data import CsvDataset, CustomFolder, ImageList, CsvCOCO, FashionIQ, CIRR
 from params import parse_args, parse_args_from_yaml, get_project_root

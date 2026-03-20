@@ -642,7 +642,7 @@ class CrossAttentionOnlyBertLayer(nn.Module):
         self.is_decoder = True
         self.add_cross_attention = True
 
-        self.crossattention = BertAttention(config, is_cross_attention=True)
+        self.crossattention = BertAttention(config, position_embedding_type="absolute")
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
@@ -667,6 +667,7 @@ class CrossAttentionOnlyBertLayer(nn.Module):
             cross_attention_outputs = self.crossattention(
                 attention_output,
                 attention_mask,
+                head_mask,
                 encoder_hidden_states,
                 encoder_attention_mask,
                 cross_attn_past_key_value,

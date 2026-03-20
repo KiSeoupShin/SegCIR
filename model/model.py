@@ -668,15 +668,29 @@ class CLIP(nn.Module):
         collect_ind = text == self.end_id 
         collect_ind = collect_ind.nonzero()[:, 1]
         ind_insert = text[0] == split_ind   
+
+        if img_tokens.dim() == 2:
+            img_tokens = img_tokens.view(b_size, 1, -1)
+        elif img_tokens.dim() != 3:
+            raise ValueError(f"Unexpected img_tokens shape: {tuple(img_tokens.shape)}")
+
+        insert_idx = int(collect_ind[0].item())
+        q = img_tokens.size(1)
+        max_insert = x.size(1) - insert_idx
+        if q > max_insert:
+            img_tokens = img_tokens[:, :max_insert, :]
+            q = img_tokens.size(1)
+
+        # Keep sequence length fixed: insert q visual tokens, drop q tail tokens.
         if isinstance(img_tokens, tuple):
             indexes = ind_insert.nonzero()
             for i, index in enumerate(indexes):
                 img = img_tokens[i].view(b_size, 1, -1)
-                x = torch.cat([x[:, :index], img, x[:, index+1:]], dim=1)
+                x = torch.cat([x[:, :insert_idx], img_tokens, x[:, insert_idx:-q]], dim=1)
         else:
-            img_tokens = img_tokens.view(b_size, 1, -1)
+            #img_tokens = img_tokens.view(b_size, 1, -1)
             ind_insert = ind_insert.nonzero()[0]
-            x = torch.cat([x[:, :ind_insert], img_tokens, x[:, ind_insert+1:]], dim=1)
+            x = torch.cat([x[:, :insert_idx], img_tokens, x[:, insert_idx:-q]], dim=1)
         #x = torch.cat([x, torch.zeros_like(x).cuda()[:, :1, :]], dim=1)
         x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND

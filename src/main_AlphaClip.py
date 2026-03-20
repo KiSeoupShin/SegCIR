@@ -352,7 +352,7 @@ def main(args):
             os.makedirs(dirname, exist_ok=True)
 
     ## For Multiprocessing
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("spawn", force=True)
 
     # Set logger
     args.log_level = logging.DEBUG if args.debug else logging.INFO

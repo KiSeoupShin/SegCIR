@@ -162,6 +162,13 @@ class SegmentImage():
 def prepare_img(img_file, transform):
     return transform(Image.open(img_file))
 
+def get_film_condition_features(model, texts, args):
+    # FiLM condition should use raw captions and allow truncation for long samples.
+    texts = tokenize([t for t in texts], truncate=True)
+    texts = texts.cuda(args.gpu, non_blocking=True)
+    text_features = model.encode_text(texts)
+    return text_features
+
 def visualize_results(model, model_clip, img2text, args, prompt, dataloader):        
     model.eval()
     model_clip.eval()
@@ -401,13 +408,27 @@ def evaluate_coco(model, model_clip, img2text, args, loader):
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)  
             id_split = tokenize(["*"])[0][1]
             ## Composed image features
-            query_image_features, _ = m.visual(region_images, alphas, return_attn=True) 
-            text_full_features = m.encode_text(text_full)
+            if args.use_alpha_clip:
+                query_image_features, _ = m.visual(region_images, alphas, return_attn=True)
+                text_full_features = m.encode_text(text_full) 
+            else:
+                query_image_features = m_c.visual(region_images) 
+                text_full_features = m_c.encode_text(text_full) 
             # text_full_features += 1.0 * torch.rand(text_full_features.shape[0], device=text_full_features.device).unsqueeze(-1) * torch.randn(text_full_features.shape, device=text_full_features.device)
             query_image_features = torch.add(query_image_features, text_full_features)
-            query_image_tokens = img2text(query_image_features.unsqueeze(1)) #transform for transformer    
-            # query_class_tokens = img2class(query_image_features)
-            composed_feature_with_class = m.encode_text_img_retrieval(text_with_blank_query, query_image_tokens, split_ind=id_split, repeat=False)                   
+            if args.use_qformer and args.use_film:
+                if args.use_alpha_clip:
+                    film_condition = get_film_condition_features(m, raw_text, args)
+                else:
+                    film_condition = get_film_condition_features(m_c, raw_text, args)
+                query_image_tokens = img2text(query_image_features.unsqueeze(1), film_condition)
+            else:
+                query_image_tokens = img2text(query_image_features.unsqueeze(1))
+
+            if args.use_alpha_clip:
+                composed_feature_with_class = m.encode_text_img_retrieval(text_with_blank_query, query_image_tokens, split_ind=id_split, repeat=False)
+            else:
+                composed_feature_with_class = m_c.encode_text_img_retrieval(text_with_blank_query, query_image_tokens, split_ind=id_split, repeat=False)
             composed_feature_with_class = composed_feature_with_class / composed_feature_with_class.norm(dim=-1, keepdim=True)        
             ## Text only features
             # text_full_features = m.encode_text(text_full)

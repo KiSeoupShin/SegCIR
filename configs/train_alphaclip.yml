@@ -15,7 +15,7 @@ eval_mode: "coco"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
 n_layer: 2
-query_tokens: 3    ##### Major revision parameter tuning required (2 ~ 6 정도에서 고민) #####
+query_tokens: 4    ##### Major revision parameter tuning required (2 ~ 6 정도에서 고민) #####
 dataset_type: "feat"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "grit", "feat"]
 dataset_type_val: "mask"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
@@ -53,7 +53,7 @@ model: "ViT-L/14"
 #                  "RN50_a2", "RN50_a2s"]
 openai_pretrained: false
 alpha_clip: true
-ablation_mode: "qformer_only"  ##### [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only] #####
+ablation_mode: "alpha_qformer_film"  ##### [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only] #####
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"
