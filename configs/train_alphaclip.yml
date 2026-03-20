@@ -2,7 +2,7 @@
 
 # General parameters
 time_suffix: true
-train_data: './cc/GRIT_mask_train_filtered.csv'
+train_data: './cc/GRIT_features_train_data_caption_processed_v2.csv'
 val_data: './cc/GRIT_caption_valid_data_v2.csv'   # 개수 issue (추후에 데이터셋 업데이트한 뒤 변경)
 prompts: null
 retrieval_data: null
@@ -15,8 +15,8 @@ eval_mode: "coco"   # ["coco", "cirr", "cirr_test", "fashion", "imgnet"]
 middle_dim: 512
 droprate: 0.1
 n_layer: 2
-query_tokens: 1    ##### Major revision parameter tuning required (2 ~ 6 정도에서 고민) #####
-dataset_type: "mask"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "grit", "feat"]
+query_tokens: 3    ##### Major revision parameter tuning required (2 ~ 6 정도에서 고민) #####
+dataset_type: "feat"   # ["webdataset", "csv", "inet", "auto", "inet,csv", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "grit", "feat"]
 dataset_type_val: "mask"   # ["webdataset", "csv", "inet", "auto"]
 csv_separator: "|"
 csv_img_key: "img_path"
@@ -46,14 +46,14 @@ regression_frequency: 2
 resume: null
 precision: "amp"   # ["amp", "fp16", "fp32"]
 model: "ViT-L/14"
-# ["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 
+# ["RN50", "RN101", "RN50x4",  python "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 
 #                  "RN50_flat", "RN50_t1", "RN50_t2", "RN50_t3", "RN50_t4", "RN50_t5", "RN50_t6",
 #                  "RN50_flat_ft", "RN50_t1_pos_ft", "RN50_t2_pos_ft", "RN50_t1_pos", "RN50_t2_pos",
 #                  "RN50_flat_large", "RN50_t1_large", "RN50_t2_large",
 #                  "RN50_a2", "RN50_a2s"]
 openai_pretrained: false
 alpha_clip: true
-ablation_mode: "alpha_film"  ##### [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only] #####
+ablation_mode: "qformer_only"  ##### [alpha_qformer_film, alpha_qformer, alpha_film, qformer_film, alpha_only, qformer_only, film_only] #####
 
 # Distributed training parameters
 dist_url: "tcp://127.0.0.1:6100"

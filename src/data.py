@@ -594,7 +594,10 @@ class MaskDataset(Dataset):
 
 class FeatDataset(Dataset):
     def __init__(self, input_filename):
-        self.dataset = pd.read_csv(input_filename, sep='|')
+        self.dataset = pd.read_csv(input_filename, sep='|').fillna("")
+        print(self.dataset['url'][0])
+        if self.dataset['url'][0].startswith('/home'):
+            self.root = '/mnt/vc-nfs/sshan/GRIT/real_data/image_features'
 
     def __len__(self):
         return len(self.dataset)
@@ -602,9 +605,10 @@ class FeatDataset(Dataset):
     def __getitem__(self, idx):
         data = self.dataset.iloc[idx]
         try:
-            image_features = torch.tensor(np.load(data['url']))
-        except:
-            return None
+            feat_path = os.path.join(self.root, data['url'].split('/')[-1])
+            image_features = torch.tensor(np.load(feat_path))
+        except Exception as e:
+            return self.__getitem__(random.randint(0, len(self)-1))
 
         return image_features, data['noun'], data['caption']
 

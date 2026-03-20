@@ -13,3 +13,6 @@ logs/
 __pycache__/
 demo/
 data/
+LAVIS/
+sam2/
+checkpoints/

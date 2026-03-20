@@ -178,7 +178,7 @@ def load_model(args):
         else:
             # Map model to be loaded to specified single gpu.
             loc = "cuda:{}".format(args.gpu)
-            checkpoint = torch.load(args.resume, map_location=loc)
+            checkpoint = torch.load(args.resume, map_location=loc,weights_only=False)
         sd = checkpoint["state_dict"]
         sd_img2text = checkpoint["state_dict_img2text"]
         if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
@@ -230,7 +230,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     model, model_clip, img2text, preprocess_val, preprocess_clip, preprocess_mask = load_model(args)
     cudnn.benchmark = True
     cudnn.deterministic = False   
-    root_project = os.path.join(get_project_root(), 'data')
+    root_project = args.eval_data #os.path.join(get_project_root(), 'data')
     ## Padding option
     if args.target_pad:
         trans_tmp = preprocess_val.transforms

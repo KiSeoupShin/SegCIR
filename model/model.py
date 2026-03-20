@@ -816,7 +816,7 @@ class IM_TRANSFORMER_BLIP_CUSTOM(nn.Module):
         return tokenizer
     
     def init_Qformer(self,num_query_token, vision_width, cross_attention_freq):
-        from lavis.models.blip2_models.Qformer import BertConfig
+        from transformers import BertConfig
         from model.cross_attention_bert import CrossAttentionOnlyBertLMHeadModel
         encoder_config = BertConfig.from_pretrained("bert-base-uncased")
         encoder_config.encoder_width = vision_width

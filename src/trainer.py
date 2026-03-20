@@ -265,11 +265,27 @@ def get_loss_img2text(model, img2text, images, texts, alphas, loss_img, loss_txt
     return total_loss
 
 
-def get_loss_img2text_features(model, img2text, image_features, noun, caption, loss_img, loss_txt, args, data_identifier=-1):
+def get_loss_img2text_features(model, img2text, image_features, noun, texts, loss_img, loss_txt, args, data_identifier=-1):
+    use_alpha_clip = getattr(args, "use_alpha_clip", True)
+    use_qformer = getattr(args, "use_qformer", True)
+    use_film = getattr(args, "use_film", True)
+
+    texts = [str(t) if isinstance(t, (str, float)) and str(t) != 'nan' else "" for t in texts]
+
+    if use_qformer and use_film:
+        try:
+            film_condition = get_film_condition_features(model, texts, args)
+        except:
+            raise ValueError(f"Film condition not found for {texts}")
+    else:
+        film_condition = None
     noun_features = get_text_features_only_caption(model, noun, args)
     noun_features += 1.0 * torch.rand(noun_features.shape[0], device=noun_features.device).unsqueeze(-1) * torch.randn(noun_features.shape, device=noun_features.device)
     image_features = torch.add(image_features, noun_features)
-    token_features = img2text(image_features.unsqueeze(1))
+    if use_qformer and use_film:
+        token_features = img2text(image_features.unsqueeze(1), film_condition)
+    else:
+        token_features = img2text(image_features.unsqueeze(1))
     token_features = _normalize_token_features_for_text(
         model, token_features, args, use_qformer=getattr(args, "use_qformer", True)
     )
